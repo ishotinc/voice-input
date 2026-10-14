@@ -7,7 +7,7 @@ i-SHOT株式会社が社内で使っているものを、無料で公開して�
 - 入れ方・使い方・困ったとき: https://i-shot.jp/apps/voice-input/help/
 - ダウンロード: [Releases](https://github.com/ishotinc/voice-input/releases/latest) の `VoiceInput-*-macOS-arm64.zip`
 
-> **サポートはありません。** Issue・Pull Request・メールへの個別のお返事はいたしかねます。ご利用はご自身の責任でお願いいたします。
+> **サポートはありません。** Issue・Pull Request・メールへの個別のお返事はいたしかねます。ご利用はご自身の責任でお願いいたします（下の「免責・サポートについて」をご覧ください）。
 > Apple の開発元の署名を付けていないため、はじめて開くときに「開発元を確認できない」と表示されます。開き方はヘルプの「はじめて開くとき」をご覧ください。
 
 ## できること
@@ -68,6 +68,12 @@ AI（Claude Code など）に設置を任せる場合は、[SETUP_WITH_AI.md](SE
 rm -rf ~/.voice-input
 rm -f ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/jp.ishot.voiceinput.meet.json
 ```
+
+## 免責・サポートについて
+
+- このソフトは現状のまま無料で提供しています。動作・正確さ・特定の目的への適合を保証するものではありません
+- このソフトの利用、または利用できなかったことによって生じたいかなる損害についても、i-SHOT株式会社は責任を負いません
+- 不具合の修正・機能の追加・質問への回答は行いません。このリポジトリは読み取り専用（アーカイブ）です。必要な変更は、各自でフォークしてお使いください
 
 ## ライセンス
 
