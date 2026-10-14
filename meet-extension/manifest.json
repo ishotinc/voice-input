@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "VoiceInput Meet 自動録音",
+  "version": "1.1.4",
+  "description": "Meetで相手が入室したら録音を開始し、自分が退出したら停止します。",
+  "permissions": [
+    "nativeMessaging",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5N8OL+CrPqDZJqTFHjlKW3z+n/NB7ObtPcalCcd+65NlBQdr1TLCG4rwK9iHyOPrt7y+FV/YkApIC2ck732iggcfN5f33GtpmMcFyDkUC+QPhthpp336IbFTk7Ae9lJjmRspLR1EScd8HUXoDQduKetLMSUiuTfvV9aIECde4px6UP4Fyp6iP8f8ogwmRCVWngfWXjjuNIUa9Dt6w0T7iMQ8V16YQxjOtFqfXnQu0P6jTMxCiufNlCODQ5otl3RDvOqf+b3hrYnzEHKQMadFz00Nf1yI7CvXgJ2/stv6WEsiNSddtcNjSFElFwjT5nkNkJ7NbpbQlWp4mhXIed6xkQIDAQAB",
+  "host_permissions": [
+    "https://meet.google.com/*"
+  ],
+  "action": {
+    "default_title": "VoiceInput Meet：接続待ち"
+  }
+}

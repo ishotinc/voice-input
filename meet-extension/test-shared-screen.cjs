@@ -1,0 +1,15 @@
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const source = fs.readFileSync(__dirname + '/content.js','utf8').replace('function reportOnce()', 'globalThis.readSharedFrameTest = readSharedFrame; function reportOnce()');
+let videos = [], drawn = 0;
+const context = vm.createContext({Date, console, location:{pathname:'/home'}, chrome:{runtime:{id:'test',sendMessage:()=>Promise.resolve()}},setInterval:()=>1,clearInterval:()=>{},document:{querySelector:()=>null,querySelectorAll:s=>s==='video'?videos:[],createElement:()=>({getContext:()=>({drawImage:()=>drawn++}),toDataURL:()=> 'data:image/jpeg;base64,AAAA'})}});
+vm.runInContext(source,context);
+const read = context.readSharedFrameTest;
+const video = (shared,visible=true)=>({videoWidth:1280,videoHeight:720,getClientRects:()=>visible?[{}]:[],getAttribute:n=>n==='data-is-presentation'&&shared?'true':null,parentElement:null});
+videos=[video(false)];assert.equal(read(true),null);assert.equal(drawn,0);console.log('PASS: webcam excluded');
+videos=[video(true,false)];assert.equal(read(true),null);console.log('PASS: hidden presentation excluded');
+videos=[video(true)];assert.ok(read(true).image);assert.equal(drawn,1);console.log('PASS: marked shared video sampled');
+read(true);assert.equal(drawn,1);console.log('PASS: capture throttled');
+assert.equal(read(false),null);console.log('PASS: call end clears frame');
+videos=[video(true),video(true)];assert.equal(read(true),null);console.log('PASS: ambiguous presentations excluded');

@@ -1,0 +1,5 @@
+SKK-JISYO.L
+Source: https://github.com/skk-dev/dict/blob/master/SKK-JISYO.L
+Upstream dictionary distributed unmodified. Copyright holders are listed in its header.
+License: GNU GPL version 2 or later; see SKK-COPYING in this directory.
+The dictionary provides readings and homophone candidates, not verified corrections.

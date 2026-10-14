@@ -1,0 +1,8 @@
+{
+  "source": "https://www.post.japanpost.jp/service/search/zipcode/download/utf/zip/utf_ken_all.zip",
+  "retrieved": "2026-09-15",
+  "sha256": "7d42728c4c9023e30668b1ef144fd5ffd831a417011c82d3e85ca3c35db43b15",
+  "entries": 116174,
+  "description": "日本郵便の郵便番号データを町域の表記・読みの照合用に加工。番地・人物との対応は検証しない。",
+  "terms": "https://www.post.japanpost.jp/service/search/zipcode/download/utf-readme.html"
+}
