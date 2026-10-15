@@ -169,6 +169,24 @@ enum SelfTest {
             if condition { print("✅ \(name)") }
             else { failures += 1; print("❌ \(name)") }
         }
+        check("履歴: Optionだけで右クリックを捕捉", HistoryShortcut.matches(.maskAlternate))
+        check("履歴: 通常右クリックを変更しない", !HistoryShortcut.matches([]))
+        check("履歴: 他の修飾キーの組合せを変更しない", !HistoryShortcut.matches([.maskAlternate, .maskControl]) && !HistoryShortcut.matches([.maskAlternate, .maskCommand]) && !HistoryShortcut.matches([.maskAlternate, .maskShift]))
+        var queue = DictationQueue()
+        queue.beginRecording()
+        let first = queue.enqueue()
+        check("変換待ちを記録", queue.pendingCount == 1 && queue.mayAutoPaste(first))
+        queue.beginRecording()
+        check("次の録音開始後は前の自動貼り付けを止める", !queue.mayAutoPaste(first))
+        let second = queue.enqueue()
+        queue.beginRecording()
+        let third = queue.enqueue()
+        check("連続3録音を個別管理", queue.pendingCount == 3)
+        queue.complete(first)
+        check("前の完了で次のジョブを失わない", queue.pendingCount == 2 && queue.mayAutoPaste(third))
+        queue.complete(second)
+        queue.complete(third)
+        check("全完了で待機へ戻る", queue.pendingCount == 0 && !queue.mayAutoPaste(third))
         let oldSettings = try? JSONDecoder().decode(Settings.self, from: Data("{\"language\":\"en\"}".utf8))
         check("古い設定を維持し、Maxで画面を参照する設定を補う",
               oldSettings?.language == "en" && oldSettings?.useScreenContext == true && oldSettings?.shareScreenContextWithClaude == true)
@@ -308,7 +326,7 @@ enum SelfTest {
             print("❌ クライアント資料テスト: \(error)")
         }
 
-        print(failures == 0 ? "\n全 \(cases.count + 15 + clientChecks + aiChecks) 件通過" : "\n\(failures) 件失敗")
+        print(failures == 0 ? "\n全 \(cases.count + 23 + clientChecks + aiChecks) 件通過" : "\n\(failures) 件失敗")
         return failures == 0
     }
 }

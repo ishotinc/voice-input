@@ -26,8 +26,9 @@ struct Settings: Codable {
     var trimTrailingPeriod: Bool = true
     /// 変換後に .wav を残すか。既定はオフ（変換後すぐ消す）。
     var keepAudioForDebug: Bool = false
-    /// 使いたくない語のリスト（JSON）のパス。空なら使わない。ここから読むだけで、書き換えはしない。
-    var styleWordsPath: String = ""
+    /// 社内の禁止語リスト。ここから読むだけで、書き換えはしない。
+    var styleWordsPath: String =
+        ""
     /// Claude 仕上げに使うモデル。
     var polishModel: String = "claude-sonnet-5"
     var polishEffort: String = "low"

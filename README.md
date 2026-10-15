@@ -69,3 +69,9 @@ rm -f ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/jp.ishot
 ## ライセンス
 
 MIT License（[LICENSE](LICENSE)）。同梱の `Resources/SKK-JISYO.L` は GNU GPL v2 以降、`Resources/addresses.json` は日本郵便の郵便番号データを加工したものです（[THIRD-PARTY-NOTICES](Resources/THIRD-PARTY-NOTICES.txt)）。
+
+## v1.2.0 の変更
+
+- 変換中も次の録音を開始できます。前の結果の自動貼り付けを抑え、履歴に残します。
+- ⌥＋右クリックで最新5件の履歴から貼り付けられます（アクセシビリティの許可が必要）。履歴はメモリ内のみです。
+- 更新時はアプリを終了して置き換え、必要に応じて権限を設定し直してください。

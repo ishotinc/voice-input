@@ -16,6 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
     private let hotKey = HotKeyManager()
+    private let historyShortcut = HistoryShortcut()
+    private var historyPasteTarget: NSRunningApplication?
+    private var historyPopupOpen = false
     private let recorder = Recorder()
     private let meeting = MeetingController()
     private var meetingStartPanel: NSPanel?
@@ -24,14 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var meetingContinuity = MeetingContinuity()
     private var suppressedMeetingCode: String?
     private var liveDictation: LiveDictation?
-    private var processingAudioURL: URL?
+    private var dictationQueue = DictationQueue()
     private let progressPanel = MenuProgress()
     private var pendingDraft: String?
     private var settings = Settings.load()
     private var permissionsWindow: PermissionsWindowController?
 
     private var state: State = .idle { didSet { updateStatusIcon() } }
-    private var history: [String] = []          // 直近10件。メモリだけ。ディスクに残さない
+    private var history: [String] = []          // 直近5件。メモリだけ。ディスクに残さない
     private var lastWarnings: [String] = []
     private lazy var polishStatus = Self.readyStatus(for: settings.aiProvider)
     private var contextStatus = "画面参照: 次の録音開始時に取得"
@@ -68,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
         progressPanel.onChange = { [weak self] display in
-            guard let self, let button = self.statusItem.button, !self.meeting.blocksRecording else { return }
+            guard let self, let button = self.statusItem.button, !self.meeting.blocksRecording, self.state != .recording else { return }
             if self.state == .idle && self.meeting.processingCount > 0 { self.updateStatusIcon(); return }
             button.image = self.symbol(display.symbol, display.tooltip)
             button.title = display.title
@@ -80,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.suppressedMeetingCode = self.automaticMeetingCode
             self.automaticMeetingCode = nil
         }
-        meeting.canStartBackground = { [weak self] in self?.state == .idle }
+        meeting.canStartBackground = { [weak self] in self?.state != .recording }
         meeting.onChange = { [weak self] in
             guard let self else { return }
             if !self.meeting.isBusy && self.meeting.status.hasPrefix("要確認:") {
@@ -116,6 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
+        historyShortcut.onOpen = { [weak self] point, target in
+            self?.showHistoryPopup(at: point, target: target)
+        }
+        historyShortcut.start()
         hotKeyRegistered = hotKey.register { [weak self] in self?.toggleRecording() }
         if !hotKeyRegistered {
             lastError = "⌥Space を登録できませんでした。他のアプリが同じキーを使っています。"
@@ -139,9 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         recorder.discard()
         liveDictation?.cancel()
-        if !settings.keepAudioForDebug, let url = processingAudioURL { try? FileManager.default.removeItem(at: url) }
+        // 未完了の録音は終了時に削除しない。変換完了時だけ片付ける。
         ResidentTranscriber.shutdown()
         hotKey.unregister()
+        historyShortcut.stop()
         Log.write("終了")
     }
 
@@ -254,12 +262,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let toggle = NSMenuItem(title: state == .recording ? "録音を止める" : "録音を始める",
                                 action: #selector(toggleFromMenu), keyEquivalent: "")
         toggle.target = self
-        toggle.isEnabled = state != .processing
+        toggle.isEnabled = !meeting.blocksRecording
         menu.addItem(toggle)
 
         menu.addItem(.separator())
 
-        let historyItem = NSMenuItem(title: "直近の変換結果", action: nil, keyEquivalent: "")
+        let historyItem = NSMenuItem(title: "音声入力の履歴（最新5件・クリックでコピー）", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         if history.isEmpty {
             let empty = NSMenuItem(title: "（まだありません）", action: nil, keyEquivalent: "")
@@ -272,6 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let item = NSMenuItem(title: title, action: #selector(copyHistory(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = index
+                item.representedObject = text
                 item.toolTip = text
                 submenu.addItem(item)
             }
@@ -382,11 +391,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleRecording()
     }
 
+    private func showHistoryPopup(at point: NSPoint, target: NSRunningApplication?) {
+        guard !historyPopupOpen else { return }
+        historyPopupOpen = true
+        historyPasteTarget = target
+        defer { historyPopupOpen = false }
+        let menu = NSMenu(title: "音声入力の履歴")
+        let heading = NSMenuItem(title: "音声入力の履歴 · 選んで貼り付け", action: nil, keyEquivalent: "")
+        heading.isEnabled = false
+        menu.addItem(heading)
+        menu.addItem(.separator())
+        if history.isEmpty {
+            let empty = NSMenuItem(title: "まだ履歴がありません", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        }
+        for text in history.prefix(5) {
+            let line = text.replacingOccurrences(of: "\n", with: " ⏎ ")
+            let item = NSMenuItem(title: String(line.prefix(60)) + (line.count > 60 ? "…" : ""),
+                                  action: #selector(pasteHistory(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = text
+            item.toolTip = text
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: point, in: nil)
+    }
+
+    @objc private func pasteHistory(_ sender: NSMenuItem) {
+        guard let text = sender.representedObject as? String else { return }
+        let target = historyPasteTarget
+        // Let menu tracking finish before restoring the input application's focus.
+        DispatchQueue.main.async {
+            Inserter.insert(text, into: target) { [weak self] error in
+                if let error { self?.lastError = error.localizedDescription }
+                Log.write(error == nil ? "履歴から貼り付けを実行" : "履歴はクリップボードへ保存（自動貼り付け不可）")
+            }
+        }
+    }
+
     @objc private func copyHistory(_ sender: NSMenuItem) {
-        guard history.indices.contains(sender.tag) else { return }
+        guard let text = sender.representedObject as? String else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(history[sender.tag], forType: .string)
+        pb.setString(text, forType: .string)
     }
 
     @objc private func copyLastError() {
@@ -645,7 +693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .idle: beginRecording()
         case .recording: endRecording()
-        case .processing: Log.write("変換中のため無視した")
+        case .processing: beginRecording()
         }
     }
 
@@ -665,6 +713,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return
         }
+        dictationQueue.beginRecording()
         // 貼り付け先は「録音を始めたとき最前面だったアプリ」。途中で切り替えても戻せる。
         targetApp = pendingTargetOverride ?? NSWorkspace.shared.frontmostApplication
         pendingTargetOverride = nil
@@ -697,7 +746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.liveDictation?.cancel(); self.liveDictation = nil
             self.recorder.onSamples = nil
             self.recordingContext = nil
-            self.lastError = message; self.state = .idle
+            self.lastError = message; self.state = .idle; self.restoreDictationState()
             Log.write(message)
         }
         do {
@@ -713,14 +762,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             liveDictation?.cancel(); liveDictation = nil; recorder.onSamples = nil
             Log.write("録音を開始できない: \(error.localizedDescription)")
             state = .idle
+            restoreDictationState()
+        }
+    }
+
+    private func restoreDictationState() {
+        guard state != .recording else { return }
+        state = dictationQueue.pendingCount > 0 ? .processing : .idle
+        if dictationQueue.pendingCount > 0 {
+            progressPanel.begin(destination: "履歴へ保存（残り\(dictationQueue.pendingCount)件）")
         }
     }
 
     private func endRecording() {
         recordingCue.cancelStart()
-        guard let recording = recorder.stop() else { state = .idle; return }
+        guard let recording = recorder.stop() else { state = .idle; restoreDictationState(); return }
         let live = liveDictation
-        processingAudioURL = recording.url
+        liveDictation = nil
+        let job = dictationQueue.enqueue()
         recorder.onSamples = nil
         state = .processing
         play(settings.stopSound)
@@ -747,7 +806,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 live?.cancel()
                 DispatchQueue.main.async {
                     if let live, self.liveDictation === live { self.liveDictation = nil }
-                    if self.processingAudioURL == recording.url { self.processingAudioURL = nil }
+
                 }
                 if completedSuccessfully && !settings.keepAudioForDebug {
                     try? FileManager.default.removeItem(at: recording.url)
@@ -764,22 +823,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             if recording.tooShort {
-                self.finish(nil, warning: "短すぎて拾えませんでした（\(String(format: "%.1f", recording.duration))秒）", target: target)
+                self.finish(nil, warning: "短すぎて拾えませんでした（\(String(format: "%.1f", recording.duration))秒）", target: target, job: job)
                 return
             }
             if recording.looksSilent {
                 self.finish(nil, warning: String(format: "音が入っていません（peak %.3f / rms %.4f）。入力デバイスと距離を確認してください。",
-                                                 recording.peak, recording.rms), target: target)
+                                                 recording.peak, recording.rms), target: target, job: job)
                 return
             }
             guard let whisper = settings.resolvedWhisper else {
-                self.finish(nil, warning: Transcriber.TranscribeError.whisperMissing.localizedDescription, target: target)
+                self.finish(nil, warning: Transcriber.TranscribeError.whisperMissing.localizedDescription, target: target, job: job)
                 return
             }
 
             let client = preparation?.wait()
             if settings.polishWithClaude && !settings.selectedClientFolder.isEmpty && (client == nil || client!.unavailable || client!.referenceText.isEmpty) {
-                self.finish(nil, warning: "顧客辞書を準備できませんでした。資料を確認してください。未補正文は貼り付けません。", target: target)
+                self.finish(nil, warning: "顧客辞書を準備できませんでした。資料を確認してください。未補正文は貼り付けません。", target: target, job: job)
                 return
             }
             DispatchQueue.main.async { self.clientStatus = client?.status ?? "顧客資料: 未選択" }
@@ -799,17 +858,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 } else { raw = try transcriber.transcribe(recording.url) }
             } catch {
-                self.finish(nil, warning: error.localizedDescription, target: target)
+                self.finish(nil, warning: error.localizedDescription, target: target, job: job)
                 return
             }
             guard !raw.isEmpty else {
-                self.finish(nil, warning: "文字が取れませんでした。", target: target)
+                self.finish(nil, warning: "文字が取れませんでした。", target: target, job: job)
                 return
             }
             // 小さい音のときに whisper が出す決まり文句を、そのまま貼らない
             if Hallucination.isOnly(raw) {
                 Log.write("決まり文句だけだったので捨てた: \(raw)")
-                self.finish(nil, warning: "音声を拾えませんでした。もう少し近くで話してください。", target: target)
+                self.finish(nil, warning: "音声を拾えませんでした。もう少し近くで話してください。", target: target, job: job)
                 return
             }
 
@@ -844,10 +903,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } catch {
                     DispatchQueue.main.async {
                         self.polishStatus = "仕上げ: 失敗（原文をコピー済み）"
+                        self.pendingDraft = draft
+                        self.rememberTranscript(draft)
                         self.copyPendingDraft()
                     }
                     Log.write("AI補正に失敗したため貼り付けを中止: \(error.localizedDescription)")
-                    self.finish(nil, warning: "AI補正に失敗しました。未補正の文字起こしをクリップボードに残しました。⌘Vで貼り付けできます。" + error.localizedDescription, target: target)
+                    self.finish(nil, warning: "AI補正に失敗しました。未補正の文字起こしをクリップボードに残しました。⌘Vで貼り付けできます。" + error.localizedDescription, target: target, job: job)
                     return
                 }
             }
@@ -860,48 +921,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Log.write("  後: \(result.text.replacingOccurrences(of: "\n", with: " / "))")
             }
             guard !Transcriber.hasRunawayRepetition(result.text) else {
-                self.finish(nil, warning: "異常な反復を検出したため貼り付けを止めました。録音はMacの復旧用フォルダに保持します。", target: target)
+                self.finish(nil, warning: "異常な反復を検出したため貼り付けを止めました。録音はMacの復旧用フォルダに保持します。", target: target, job: job)
                 return
             }
             completedSuccessfully = true
-            self.finish(result, warning: nil, target: target)
+            self.finish(result, warning: nil, target: target, job: job)
         }
     }
 
-    private func finish(_ result: FormatResult?, warning: String?, target: NSRunningApplication?) {
-        DispatchQueue.main.async {
-            if let warning {
-                self.state = .idle
-                self.progressPanel.finish(error: warning)
-                self.lastError = warning
-                Log.write("中断: \(warning)")
-                NSSound.beep()
-                return
-            }
-            guard let result, !result.text.isEmpty else {
-                self.state = .idle
-                self.progressPanel.finish(error: "入力できる文章がありませんでした。")
-                return
-            }
-            self.progressPanel.update("貼り付け中", detail: "元の入力先へ文章を入れています。")
-            self.lastWarnings = result.styleWarnings
-            self.history.insert(result.text, at: 0)
-            if self.history.count > 10 { self.history.removeLast(self.history.count - 10) }
-            self.pendingDraft = result.text
-            Inserter.insert(result.text, into: target) { error in
-                self.state = .idle
-                self.progressPanel.finish(error: error?.localizedDescription)
-                guard let error else { return }
-                // クリップボードには載っているので、作業は止まらない
-                self.lastError = error.localizedDescription
-                Log.write("自動で貼れなかった: \(error.localizedDescription)")
-                NSSound.beep()
-                if !self.permissionsShownOnce {
-                    self.permissionsShownOnce = true
-                    }
-            }
-        }
+    private func rememberTranscript(_ text: String) {
+        history.insert(text, at: 0)
+        if history.count > 5 { history.removeLast(history.count - 5) }
     }
+
+    private func finish(_ result: FormatResult?, warning: String?, target: NSRunningApplication?, job: Int) {
+        // Keep delivery in recording order, including the asynchronous paste callback.
+        let delivered = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            let complete: (String?) -> Void = { error in
+                self.dictationQueue.complete(job)
+                if let error { self.lastError = error; Log.write("変換結果: " + error) }
+                if self.state != .recording {
+                    self.progressPanel.reset()
+                    self.restoreDictationState()
+                }
+                delivered.signal()
+            }
+            if let warning { complete(warning); return }
+            guard let result, !result.text.isEmpty else {
+                complete("入力できる文章がありませんでした。")
+                return
+            }
+            self.lastWarnings = result.styleWarnings
+            self.rememberTranscript(result.text)
+            self.pendingDraft = result.text
+            guard self.dictationQueue.mayAutoPaste(job), self.state != .recording,
+                  !self.meeting.blocksRecording else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(result.text, forType: .string)
+                Log.write("次の録音を優先: 変換結果をクリップボードと履歴へ保存")
+                complete(nil)
+                return
+            }
+            Inserter.insert(result.text, into: target, shouldPaste: {
+                self.dictationQueue.mayAutoPaste(job) && self.state != .recording && !self.meeting.blocksRecording
+            }) { error in complete(error?.localizedDescription) }
+        }
+        delivered.wait()
+    }
+
 }
 
 extension AppDelegate {

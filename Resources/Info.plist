@@ -2,29 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>VoiceInput</string>
-    <key>CFBundleDisplayName</key>
-    <string>音声入力</string>
-    <key>CFBundleExecutable</key>
-    <string>VoiceInput</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.ishot.voice-input</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>⌥Space で話した内容を、その場で文字にして貼り付けるために使います。音声は端末の中だけで処理し、外に送りません。</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>会議モードで選択したブラウザの音声を録音し、議事録を作成します。画面映像は保存しません。</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>i-SHOT</string>
+	<key>CFBundleDisplayName</key>
+	<string>音声入力</string>
+	<key>CFBundleExecutable</key>
+	<string>VoiceInput</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.ishot.voice-input</string>
+	<key>CFBundleName</key>
+	<string>VoiceInput</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.2.0</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>i-SHOT</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>⌥Space で話した内容を、その場で文字にして貼り付けるために使います。音声は端末の中だけで処理し、外に送りません。</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>会議モードで選択したブラウザの音声を録音し、議事録を作成します。画面映像は保存しません。</string>
 </dict>
 </plist>

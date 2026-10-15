@@ -62,6 +62,7 @@ enum Inserter {
     /// 許可済みならCGEventで貼り付け、未許可ならクリップボードに残す。
     static func insert(_ text: String,
                        into target: NSRunningApplication?,
+                       shouldPaste: @escaping () -> Bool = { true },
                        completion: @escaping (Error?) -> Void) {
         let body = text.trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
         guard !body.isEmpty else { completion(nil); return }
@@ -70,6 +71,8 @@ enum Inserter {
         pb.clearContents()
         pb.setString(body, forType: .string)
 
+        guard shouldPaste() else { completion(nil); return }
+        let clipboardVersion = pb.changeCount
         let needsSwitch = target != nil
             && NSWorkspace.shared.frontmostApplication?.processIdentifier != target?.processIdentifier
         if needsSwitch, let target, !target.isTerminated {
@@ -83,6 +86,7 @@ enum Inserter {
         // CGEvent は主スレッドから投げる。別スレッドから投げると届かない（実測で貼り付けが空になった）。
         if AXIsProcessTrusted() && CGPreflightPostEventAccess() && !forceSystemEventsPath {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard shouldPaste(), pb.changeCount == clipboardVersion else { completion(nil); return }
                 guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
                     completion(InsertError.noAccessibility)
                     return
