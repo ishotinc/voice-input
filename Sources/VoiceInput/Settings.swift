@@ -31,6 +31,11 @@ struct Settings: Codable {
     /// Claude 仕上げに使うモデル。
     var polishModel: String = "claude-sonnet-5"
     var polishEffort: String = "low"
+    /// AI の仕上げに使うもの。既定は Claude（今までどおり）。選んだものが使えないときは別の会社の AI に切り替えない。
+    var aiProvider: AIProvider = .claude
+    /// OpenAI（API キー・Codex CLI 共通）で使うモデルと思考量。gpt-6.1-sol は low〜max（none/minimal は不可）。
+    var openAIModel: String = "gpt-6.1-sol"
+    var openAIEffort: String = "low"
 
     /// Read the target input field locally at recording start.
     var useScreenContext: Bool = true
@@ -63,6 +68,9 @@ struct Settings: Codable {
         styleWordsPath = try c.decodeIfPresent(String.self, forKey: .styleWordsPath) ?? d.styleWordsPath
         polishModel = try c.decodeIfPresent(String.self, forKey: .polishModel) ?? d.polishModel
         polishEffort = try c.decodeIfPresent(String.self, forKey: .polishEffort) ?? d.polishEffort
+        aiProvider = (try? c.decodeIfPresent(AIProvider.self, forKey: .aiProvider)) ?? d.aiProvider
+        openAIModel = try c.decodeIfPresent(String.self, forKey: .openAIModel) ?? d.openAIModel
+        openAIEffort = try c.decodeIfPresent(String.self, forKey: .openAIEffort) ?? d.openAIEffort
         useScreenContext = try c.decodeIfPresent(Bool.self, forKey: .useScreenContext) ?? d.useScreenContext
         shareScreenContextWithClaude = try c.decodeIfPresent(Bool.self, forKey: .shareScreenContextWithClaude) ?? d.shareScreenContextWithClaude
         selectedClientFolder = try c.decodeIfPresent(String.self, forKey: .selectedClientFolder) ?? d.selectedClientFolder

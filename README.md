@@ -14,16 +14,15 @@ i-SHOT株式会社が社内で使っているものを、無料で公開して�
 
 - **話している間に文字にする** — 文字起こし（whisper.cpp）は Mac の中で動かし続け、話の切れ目ごとに先に文字にします。音声は外へ送りません
 - **お客様の名前の漢字をまとめて覚える** — 「顧客資料フォルダを選ぶ…」で選んだフォルダの Markdown から人名・社名の表記を読み、その書き方に合わせます
-- **開いている画面に合わせて仕上げる** — 入力欄のまわりの文字を手がかりに、ご自身の Claude が表記と言葉づかいを整えます（オフにできます）
+- **開いている画面に合わせて仕上げる** — 入力欄のまわりの文字を手がかりに、ご自身の AI（Claude か OpenAI）が表記と言葉づかいを整えます（オフにできます）
 - **AI の仕上げも録音中に始める** — 済んだ文から先に仕上げ、止めたときに残りだけを待ちます
-- **Google Meet の議事録** — Chrome 拡張で入退室を検知して録音し、話者を分けて要約・決定事項・TODO にまとめます
 
 ## 2つのモード
 
 | モード | 使うもの | 費用 |
 |---|---|---|
 | 高速入力モード | Mac の中だけ（AI もネットも使わない） | かかりません |
-| 通常モード（AI 補正）・議事録の要約 | ご自身の Anthropic API キー（メニュー「Claude APIキーを設定…」）か、Max プランでログインした Claude Code | API キーは使った分だけ。Max プランは追加料金なし |
+| 通常モード（AI 補正） | 次のどれか1つ（メニュー「AI の仕上げに使うもの」で選ぶ）<br>・Claude: Anthropic の API キー（「Claude APIキーを設定…」）か、Max プランでログインした Claude Code<br>・OpenAI: OpenAI の API キー（「OpenAI APIキーを設定…」）<br>・OpenAI: ChatGPT のプランでログインした Codex（`codex login`） | API キーは使った分だけ。Claude の Max プラン・ChatGPT のプランは追加料金なし |
 
 ## 動作環境
 
@@ -49,14 +48,6 @@ Xcode（または Swift 5.9 以降のコマンドラインツール）が必要�
 ./build.sh          # ビルド → 自己テスト → VoiceInput.app を作って署名
 ./install.sh        # ~/Applications に入れ、ログイン時に起動するよう登録
 ./finish-setup.sh   # 権限の確認と通しの試験
-```
-
-会議の議事録を使う場合は、続けて次を実行し、Chrome の `chrome://extensions` で「パッケージ化されていない拡張機能を読み込む」から `~/.voice-input/meet-extension` を選びます。
-
-```sh
-./setup-meeting-models.sh
-./setup-meeting-asr.sh        # 任意（会議用の高精度モデル）
-python3 meet-extension/install-bridge.py
 ```
 
 AI（Claude Code など）に設置を任せる場合は、[SETUP_WITH_AI.md](SETUP_WITH_AI.md) をそのまま渡してください。

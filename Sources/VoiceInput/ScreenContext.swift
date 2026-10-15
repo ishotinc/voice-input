@@ -30,28 +30,63 @@ struct ScreenContext {
     }
 
     static func capture(app: NSRunningApplication?, allowOwnProcess: Bool = false) -> ScreenContext? {
-        guard AXIsProcessTrusted(), let app, (allowOwnProcess || app.processIdentifier != ProcessInfo.processInfo.processIdentifier) else { return nil }
+        func unavailable(_ reason: String) -> ScreenContext? {
+            Log.write("画面参照不可: \(reason) app=\(app?.bundleIdentifier ?? "unknown")")
+            return nil
+        }
+        guard AXIsProcessTrusted() else { return unavailable("アクセシビリティ未許可") }
+        guard let app, (allowOwnProcess || app.processIdentifier != ProcessInfo.processInfo.processIdentifier) else { return unavailable("対象アプリなし・自アプリ") }
         let application = AXUIElementCreateApplication(app.processIdentifier)
-        let deadline = Date().addingTimeInterval(1.0)
-        AXUIElementSetMessagingTimeout(application, 0.025)
+        let deadline = Date().addingTimeInterval(1.5)
+        AXUIElementSetMessagingTimeout(application, 0.1)
+        // Electron/Chromium expose their text tree only after an accessibility client requests it.
+        // This enables the target's tree, not macOS permissions; never show a permission prompt.
+        for attribute in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
+            var settable = DarwinBoolean(false)
+            let supported = AXUIElementIsAttributeSettable(application, attribute as CFString, &settable) == .success && settable.boolValue
+            let chromium = app.bundleIdentifier?.hasPrefix("com.google.Chrome") == true
+                || app.bundleURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path) } == true
+            if supported || chromium {
+                let status = AXUIElementSetAttributeValue(application, attribute as CFString, kCFBooleanTrue)
+                Log.write("画面参照 AX公開要求 \(attribute)=\(status.rawValue)")
+            }
+        }
+        var lastAXError: AXError = .success
         func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
             guard Date() < deadline else { return nil }
-            AXUIElementSetMessagingTimeout(element, 0.025)
+            AXUIElementSetMessagingTimeout(element, 0.1)
             var result: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &result) == .success else { return nil }
+            let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &result)
+            guard error == .success else { lastAXError = error; return nil }
             return result
         }
         func element(_ owner: AXUIElement, _ attribute: String) -> AXUIElement? {
             guard let object = value(owner, attribute), CFGetTypeID(object) == AXUIElementGetTypeID() else { return nil }
             return (object as! AXUIElement)
         }
-        guard let focused = element(application, kAXFocusedUIElementAttribute) else { return nil }
+        func focusedElement() -> AXUIElement? {
+            if let local = element(application, kAXFocusedUIElementAttribute) { return local }
+            // Some applications expose focus only through the system-wide accessibility object.
+            if let systemFocus = element(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute) {
+                var pid: pid_t = 0
+                if AXUIElementGetPid(systemFocus, &pid) == .success, pid == app.processIdentifier { return systemFocus }
+            }
+            return nil
+        }
+        var focus = focusedElement()
+        for _ in 0..<3 where focus == nil && Date() < deadline {
+            guard allowOwnProcess || NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return unavailable("取得中に対象が変化") }
+            Thread.sleep(forTimeInterval: 0.05)
+            focus = focusedElement()
+        }
+        guard let focused = focus else { return unavailable("フォーカス取得失敗 AX=\(lastAXError.rawValue)") }
         // Fail closed when the focused field cannot be classified; check its ancestors too.
-        guard value(focused, kAXRoleAttribute) as? String != nil else { return nil }
+        guard value(focused, kAXRoleAttribute) as? String != nil else { return unavailable("入力欄の種類を判別できない") }
+        Log.write("画面参照 focus role=\(value(focused, kAXRoleAttribute) as? String ?? "unknown") subrole=\(value(focused, kAXSubroleAttribute) as? String ?? "none")")
         var ancestor: AXUIElement? = focused
         for _ in 0..<6 {
             guard let current = ancestor else { break }
-            if (value(current, kAXSubroleAttribute) as? String) == "AXSecureTextField" { return nil }
+            if (value(current, kAXSubroleAttribute) as? String) == "AXSecureTextField" { return unavailable("パスワード欄を除外") }
             ancestor = element(current, kAXParentAttribute)
         }
         let window = element(application, kAXFocusedWindowAttribute)
@@ -63,11 +98,17 @@ struct ScreenContext {
         var queue = element(focused, kAXParentAttribute).map { [$0] } ?? window.map { [$0] } ?? []
         if let window { queue.append(window) }
         var seenLabels = Set<String>()
+        var seenNodes: [AXUIElement] = []
         var visited = 0
         while !queue.isEmpty && visited < 240 && nearby.count < 4800 && Date() < deadline {
             let node = queue.removeFirst()
+            if seenNodes.contains(where: { CFEqual($0, node) }) { continue }
+            seenNodes.append(node)
             visited += 1
-            if (value(node, kAXSubroleAttribute) as? String) == "AXSecureTextField" { continue }
+            if (value(node, kAXSubroleAttribute) as? String) == "AXSecureTextField" {
+                if value(node, kAXFocusedAttribute) as? Bool == true { return unavailable("パスワード欄を除外") }
+                continue
+            }
             if (value(node, kAXRoleAttribute) as? String) == kAXStaticTextRole,
                let label = value(node, kAXValueAttribute) as? String, !label.isEmpty, seenLabels.insert(label).inserted {
                 nearby += String(label.prefix(1000)) + "\n"

@@ -40,20 +40,12 @@ AI はシステム設定を代わりに操作しない。利用者に次を頼�
 
 ## AI 補正（任意）
 
-次のどちらかを利用者に選んでもらう。AI は API キーを代わりに入力しない。
+次のどれかを利用者に選んでもらい、メニュー「AI の仕上げに使うもの」で同じものを選んでもらう。AI は API キーを代わりに入力せず、ログインも代わりにしない。
 
-- Anthropic の API キー: メニュー「Claude APIキーを設定…」に利用者自身が貼り付ける
-- Claude Code の Max プラン: 利用者がターミナルで `claude` を開いてログインする
-
-## 会議の議事録（任意）
-
-```sh
-./setup-meeting-models.sh
-./setup-meeting-asr.sh
-python3 meet-extension/install-bridge.py
-```
-
-Chrome 拡張の読み込み（`chrome://extensions` → デベロッパーモード → `~/.voice-input/meet-extension`）は利用者に頼む。
+- Claude（Anthropic の API キー）: メニュー「Claude APIキーを設定…」に利用者自身が貼り付ける
+- Claude（Claude Code の Max プラン）: 利用者がターミナルで `claude` を開いてログインする
+- OpenAI（API キー）: メニュー「OpenAI APIキーを設定…」に利用者自身が貼り付ける
+- OpenAI（Codex・ChatGPT のプラン）: `npm i -g @openai/codex` で入れ、利用者が `codex login` で ChatGPT のアカウントにログインする
 
 ## 守ること
 

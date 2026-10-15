@@ -31,6 +31,9 @@ final class MeetingGoogleDrive {
     private var cachedAuthenticated = false
     private var cachedFolderURL: URL?
     private let queue = DispatchQueue(label: "voiceinput.google")
+    // Main-thread only. Repeated clicks reopen the current flow instead of queuing five-minute waits.
+    private var connecting = false
+    private var authorizationURL: URL?
     private var access: (String, Date)?
     private let service = "jp.ishot.VoiceInput.GoogleMeetings"
     private let base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voice-input/google-meetings")
@@ -74,10 +77,15 @@ final class MeetingGoogleDrive {
     }
     func connect(completion: @escaping (Result<Void,Error>) -> Void) {
         dispatchPrecondition(condition:.onQueue(.main))
-        if let old = credentials() {
-            queue.async { self.login(client:old.client, completion:completion) }
+        if connecting {
+            if let url = authorizationURL { openAuthorization(url) { _ in } }
             return
         }
+        if let old = credentials() {
+            beginLogin(client: old.client, completion: completion)
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel(); panel.title = "Google Cloudのデスクトップ用OAuthクライアントJSONを選択"; panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
         panel.begin { response in
             guard response == .OK, let url = panel.url else { completion(.failure(Failure(message:"Google接続をキャンセルしました。"))); return }
@@ -96,8 +104,39 @@ final class MeetingGoogleDrive {
             guard client.client_id.hasSuffix(".apps.googleusercontent.com") else {
                 throw Failure(message: "GoogleのOAuthクライアントIDを確認してください。")
             }
-            queue.async { self.login(client: client, completion: completion) }
+            beginLogin(client: client, completion: completion)
         } catch { completion(.failure(error)) }
+    }
+    private func beginLogin(client: Client, completion: @escaping (Result<Void,Error>) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !connecting else { return }
+        connecting = true
+        Log.write("Google再接続: 開始")
+        queue.async {
+            self.login(client: client) { result in
+                self.connecting = false
+                self.authorizationURL = nil
+                switch result {
+                case .success: Log.write("Google再接続: 完了")
+                case .failure(let error): Log.write("Google再接続: " + error.localizedDescription)
+                }
+                completion(result)
+            }
+        }
+    }
+    private func openAuthorization(_ url: URL, completion: @escaping (Bool) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let workspace = NSWorkspace.shared
+        guard let browser = workspace.urlForApplication(withBundleIdentifier: "com.google.Chrome")
+                ?? workspace.urlForApplication(toOpen: url) else {
+            completion(false); return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        workspace.open([url], withApplicationAt: browser, configuration: configuration) { app, error in
+            Log.write("Google再接続: ブラウザー起動 " + (app != nil && error == nil ? "成功" : "失敗"))
+            completion(app != nil && error == nil)
+        }
     }
     private func login(client: Client, completion: @escaping (Result<Void,Error>)->Void) {
         do {
@@ -108,7 +147,22 @@ final class MeetingGoogleDrive {
             let redirect = "http://127.0.0.1:\(listener.port)/oauth"
             var url = URLComponents(string:"https://accounts.google.com/o/oauth2/v2/auth")!
             url.queryItems = ["client_id":client.client_id,"redirect_uri":redirect,"response_type":"code","scope":scope,"code_challenge":challenge,"code_challenge_method":"S256","state":nonce,"access_type":"offline","prompt":"consent select_account"].map { URLQueryItem(name:$0.key,value:$0.value) }
-            DispatchQueue.main.async { NSWorkspace.shared.open(url.url!) }
+            let opened = DispatchSemaphore(value: 0)
+            let resultLock = NSLock()
+            var didOpen = false
+            let authURL = url.url!
+            DispatchQueue.main.async {
+                self.authorizationURL = authURL
+                self.openAuthorization(authURL) { success in
+                    resultLock.lock(); didOpen = success; resultLock.unlock()
+                    opened.signal()
+                }
+            }
+            guard opened.wait(timeout: .now() + 20) == .success else {
+                throw Failure(message: "Google認証画面を開けませんでした。Chromeを起動して、もう一度Google連携を押してください。")
+            }
+            resultLock.lock(); let launched = didOpen; resultLock.unlock()
+            guard launched else { throw Failure(message: "Google認証用のブラウザーを開けませんでした。Chromeを起動して再接続してください。") }
             let code = try listener.code(state:nonce)
             let result = try token(["client_id":client.client_id,"client_secret":client.client_secret ?? "","code":code,"code_verifier":verifier,"redirect_uri":redirect,"grant_type":"authorization_code"])
             guard let refresh = result["refresh_token"] as? String else { throw Failure(message:"Googleから継続接続の許可を取得できませんでした。再接続してください。") }

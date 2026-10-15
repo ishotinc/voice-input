@@ -200,6 +200,62 @@ enum SelfTest {
         check("APIのエラー文を取り出す", AnthropicAPI.errorMessage(Data(#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#.utf8)) == "invalid x-api-key")
         check("sk-ant- で始まらないキーは保存しない", (try? AnthropicKeychain.store("abc")) == nil)
 
+        // OpenAI（API キー・Codex CLI）の道。キーチェーンには書かない（形式の確認で先に止まる）。
+        var aiChecks = 0
+        func aiCheck(_ name: String, _ condition: Bool) { aiChecks += 1; check(name, condition) }
+        func openAI(_ json: String) -> String? { try? OpenAIAPI.parseText(Data(json.utf8)) }
+        func errorOf(_ body: () throws -> String) -> Error? { do { _ = try body(); return nil } catch { return error } }
+        aiCheck("OpenAI: 完了した応答の本文だけを使う", openAI(#"{"status":"completed","output":[{"type":"reasoning","summary":[]},{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"明日の午後3時に変更してください\n","annotations":[]}]}]}"#) == speech)
+        aiCheck("OpenAI: 出力上限で切れた応答を使わない", openAI(#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","status":"incomplete","content":[{"type":"output_text","text":"途中"}]}]}"#) == nil)
+        aiCheck("OpenAI: 内容の制限で止まった応答を使わない", openAI(#"{"status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}"#) == nil)
+        aiCheck("OpenAI: 拒否（refusal）を貼り付けない", openAI(#"{"status":"completed","output":[{"type":"message","status":"completed","content":[{"type":"refusal","refusal":"お手伝いできません"}]}]}"#) == nil)
+        aiCheck("OpenAI: 失敗した応答を貼り付けない", openAI(#"{"status":"failed","error":{"code":"server_error","message":"boom"},"output":[]}"#) == nil)
+        aiCheck("OpenAI: ツール呼び出しの応答を使わない", openAI(#"{"status":"completed","output":[{"type":"function_call","name":"x","arguments":"{}"}]}"#) == nil)
+        aiCheck("OpenAI: 本文が空なら使わない", openAI(#"{"status":"completed","output":[{"type":"message","status":"completed","content":[{"type":"output_text","text":"  "}]}]}"#) == nil)
+        if case .some(OpenAIAPI.Failure.truncated) = errorOf({ try OpenAIAPI.parseText(Data(#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}"#.utf8)) }) {
+            aiCheck("OpenAI: 途中で切れたことをエラーとして伝える", true)
+        } else { aiCheck("OpenAI: 途中で切れたことをエラーとして伝える", false) }
+        let openAIError = OpenAIAPI.errorMessage(Data(#"{"error":{"message":"Incorrect API key provided: sk-inval*************test. You can find your API key at https://platform.openai.com/account/api-keys.","type":"invalid_request_error","code":"invalid_api_key"},"status":401}"#.utf8))
+        aiCheck("OpenAI: エラー文を取り出し、キーの断片を伏せる", openAIError.hasPrefix("Incorrect API key provided: sk-…") && !openAIError.contains("inval"))
+        aiCheck("OpenAI: sk- で始まるキーを受け付ける", OpenAIKeychain.isValidFormat("sk-proj-" + String(repeating: "a", count: 40)) && OpenAIKeychain.isValidFormat("  sk-" + String(repeating: "b", count: 40) + "\n"))
+        aiCheck("OpenAI: 形式が違うキー・Claude のキー・空白入りは受け付けない", !OpenAIKeychain.isValidFormat("abc") && !OpenAIKeychain.isValidFormat("sk-ant-" + String(repeating: "a", count: 40)) && !OpenAIKeychain.isValidFormat("sk-" + String(repeating: "a", count: 10) + " " + String(repeating: "a", count: 10)) && !OpenAIKeychain.isValidFormat("sk-short"))
+        aiCheck("OpenAI: 形式が違うキーはキーチェーンに書く前に止める", (try? OpenAIKeychain.store("sk-ant-" + String(repeating: "a", count: 40))) == nil)
+        aiCheck("OpenAI: 応答を保存させず、ツールを渡さない", { let b = OpenAIAPI.requestBody(system: "s", input: "i", model: "gpt-6.1-sol", effort: "low", maxOutputTokens: 100); return b["store"] as? Bool == false && b["tools"] == nil && (b["reasoning"] as? [String: String])?["effort"] == "low" && b["instructions"] as? String == "s" }())
+        aiCheck("全体を包んだコードブロックだけを外す", AIText.unwrapWholeCodeFence("```text\n明日確認して\n```") == "明日確認して" && AIText.unwrapWholeCodeFence("```json\n{\"a\":1}\n```") == "{\"a\":1}")
+        aiCheck("文中のコードや包まれていない返答には触らない", AIText.unwrapWholeCodeFence("`ls` を実行して") == "`ls` を実行して" && AIText.unwrapWholeCodeFence("```a```") == "```a```" && AIText.unwrapWholeCodeFence("```\nA\n```\n説明\n```\nB\n```") == "```\nA\n```\n説明\n```\nB\n```")
+
+        func codex(_ lines: [String]) -> String? { try? CodexCLI.parseEvents(Data(lines.joined(separator: "\n").utf8)) }
+        let started = #"{"type":"thread.started","thread_id":"t"}"#, turn = #"{"type":"turn.started"}"#
+        let done = #"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#
+        let answer = #"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"明日の午後3時に変更してください"}}"#
+        aiCheck("Codex: 完了したターンの最後の返答だけを使う", codex([started, turn, answer, done]) == speech)
+        aiCheck("Codex: モデル情報の警告があっても本文は採る", codex([started, #"{"type":"item.completed","item":{"id":"w","type":"error","message":"Model metadata not found"}}"#, turn, answer, done]) == speech)
+        aiCheck("Codex: 失敗したターンを貼り付けない", codex([started, turn, #"{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"not supported\"}}"}"#, #"{"type":"turn.failed","error":{"message":"x"}}"#]) == nil)
+        aiCheck("Codex: 終わっていないターンを貼り付けない", codex([started, turn, answer]) == nil)
+        aiCheck("Codex: コマンドを実行した応答を使わない", codex([started, turn, #"{"type":"item.completed","item":{"id":"c","type":"command_execution","command":"ls","status":"completed"}}"#, answer, done]) == nil)
+        aiCheck("Codex: JSON でない出力を使わない", codex(["Logged in", done]) == nil)
+        if case .some(Polisher.PolishError.codexFailed(let message)) = errorOf({ try CodexCLI.parseEvents(Data([started, turn, #"{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'x' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#].joined(separator: "\n").utf8)) }) {
+            aiCheck("Codex: 失敗の理由を短く取り出す", message.hasPrefix("The 'x' model is not supported"))
+        } else { aiCheck("Codex: 失敗の理由を短く取り出す", false) }
+        aiCheck("Codex: ChatGPT ログインだけを通す", CodexCLI.loginState(Data("Logged in using ChatGPT\n".utf8)) == nil)
+        if case .some(.codexAPIKeyLogin) = CodexCLI.loginState(Data("Logged in using an API key - sk-…\n".utf8)),
+           case .some(.codexLoginRequired) = CodexCLI.loginState(Data("Not logged in\n".utf8)) {
+            aiCheck("Codex: API キーのログイン・未ログインを見分ける", true)
+        } else { aiCheck("Codex: API キーのログイン・未ログインを見分ける", false) }
+        let codexArgs = CodexCLI.execArguments(model: "gpt-6.1-sol", effort: "low", instructionsFile: "/tmp/a \"b\".md", workdir: "/tmp/w")
+        aiCheck("Codex: 読み取り専用・承認なし・道具なし・保存なしで1回だけ呼ぶ",
+                codexArgs.first == "exec" && codexArgs.last == "-" && codexArgs.contains("--ephemeral") && codexArgs.contains("--ignore-user-config")
+                && codexArgs.contains("--json") && codexArgs.contains("approval_policy=\"never\"") && codexArgs.contains("features.shell_tool=false")
+                && codexArgs.contains("web_search=\"disabled\"") && zip(codexArgs, codexArgs.dropFirst()).contains { $0 == "--sandbox" && $1 == "read-only" }
+                && codexArgs.contains(#"model_instructions_file="/tmp/a \"b\".md""#))
+        aiCheck("Codex・OpenAI の認証を子プロセスへ渡さない", { let e = Polisher.sanitizedEnvironment(["HOME": "/tmp", "OPENAI_API_KEY": "fake", "CODEX_API_KEY": "fake", "OPENAI_BASE_URL": "x"]); return e["OPENAI_API_KEY"] == nil && e["CODEX_API_KEY"] == nil && e["OPENAI_BASE_URL"] == nil && e["HOME"] == "/tmp" }())
+        aiCheck("古い設定は Claude のまま", oldSettings?.aiProvider == .claude && Settings().aiProvider == .claude)
+        var codexSettings = Settings(); codexSettings.aiProvider = .codexCLI; codexSettings.openAIModel = "gpt-6-luna"
+        let restoredCodex = (try? JSONEncoder().encode(codexSettings)).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
+        aiCheck("選んだ AI とモデルを保存して読み戻せる", restoredCodex?.aiProvider == .codexCLI && restoredCodex?.openAIModel == "gpt-6-luna")
+        let unknownProvider = try? JSONDecoder().decode(Settings.self, from: Data(#"{"aiProvider":"someday"}"#.utf8))
+        aiCheck("知らない値の設定は Claude に戻して読む", unknownProvider?.aiProvider == .claude)
+
         var clientChecks = 0
         func clientCheck(_ name: String, _ condition: Bool) {
             clientChecks += 1
@@ -252,7 +308,7 @@ enum SelfTest {
             print("❌ クライアント資料テスト: \(error)")
         }
 
-        print(failures == 0 ? "\n全 \(cases.count + 15 + clientChecks) 件通過" : "\n\(failures) 件失敗")
+        print(failures == 0 ? "\n全 \(cases.count + 15 + clientChecks + aiChecks) 件通過" : "\n\(failures) 件失敗")
         return failures == 0
     }
 }

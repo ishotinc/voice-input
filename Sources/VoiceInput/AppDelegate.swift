@@ -33,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var state: State = .idle { didSet { updateStatusIcon() } }
     private var history: [String] = []          // 直近10件。メモリだけ。ディスクに残さない
     private var lastWarnings: [String] = []
-    private var polishStatus = AnthropicAPI.hasKey ? "仕上げ: APIキーで Claude を使う" : "仕上げ: 次の変換時にMaxログインを確認"
+    private lazy var polishStatus = Self.readyStatus(for: settings.aiProvider)
     private var contextStatus = "画面参照: 次の録音開始時に取得"
     private var clientStatus = "顧客資料: フォルダ未選択"
     private var recordingPreparation: ReferencePreparation?
@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateStatusIcon()
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(showJevSettings), name: Notification.Name("com.ishot.voice-input.show-jev"), object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(receiveSharedScreen(_:)), name: Notification.Name("com.ishot.voice-input.shared-screen"), object: nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(diagnoseScreenContext), name: Notification.Name("com.ishot.voice-input.context-diagnostic"), object: nil)
         MeetingTranscriptOutbox.shared.start()
         prepareSelectedDictionary()
         ResidentTranscriber.warm(modelPath: settings.resolvedModel, useMLX: settings.mlxForDictation)
@@ -294,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         for (title, action, enabled) in [
             ("入力画面を参考にする（端末内）", #selector(toggleContext), settings.useScreenContext),
-            ("画面の参考情報もClaudeに送る", #selector(toggleCloudContext), settings.shareScreenContextWithClaude)
+            ("画面の参考情報もAIに送る", #selector(toggleCloudContext), settings.shareScreenContextWithClaude)
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
@@ -306,10 +307,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         preferences.target = self
         preferences.isEnabled = state == .idle
         menu.addItem(preferences)
+        let providerItem = NSMenuItem(title: "AI の仕上げに使うもの: " + settings.aiProvider.menuTitle, action: nil, keyEquivalent: "")
+        let providerMenu = NSMenu()
+        for provider in AIProvider.allCases {
+            let missing = Polisher.missingRequirement(provider)
+            let item = NSMenuItem(title: provider.menuTitle + (missing == nil ? "" : "（" + Self.shortMissing(provider) + "）"),
+                                  action: #selector(selectAIProvider(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = provider.rawValue
+            item.state = settings.aiProvider == provider ? .on : .off
+            item.isEnabled = state == .idle
+            providerMenu.addItem(item)
+        }
+        providerItem.submenu = providerMenu
+        menu.addItem(providerItem)
+        if let missing = Polisher.missingRequirement(settings.aiProvider), settings.polishWithClaude {
+            let warning = NSMenuItem(title: "⚠️ " + (missing.errorDescription ?? ""), action: nil, keyEquivalent: "")
+            warning.isEnabled = false
+            menu.addItem(warning)
+        }
         let apiKey = NSMenuItem(title: AnthropicAPI.hasKey ? "Claude APIキー: 設定済み（変更・削除…）" : "Claude APIキーを設定…", action: #selector(showAPIKeySettings), keyEquivalent: "")
         apiKey.target = self
         apiKey.isEnabled = state == .idle
         menu.addItem(apiKey)
+        let openAIKey = NSMenuItem(title: OpenAIAPI.hasKey ? "OpenAI APIキー: 設定済み（変更・削除…）" : "OpenAI APIキーを設定…", action: #selector(showOpenAIKeySettings), keyEquivalent: "")
+        openAIKey.target = self
+        openAIKey.isEnabled = state == .idle
+        menu.addItem(openAIKey)
         let clientLine = NSMenuItem(title: clientStatus, action: nil, keyEquivalent: "")
         clientLine.isEnabled = false
         menu.addItem(clientLine)
@@ -471,15 +495,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             do {
                 try AnthropicKeychain.store(key)
-                polishStatus = "仕上げ: APIキーで Claude を使う"
+                polishStatus = Self.readyStatus(for: settings.aiProvider)
                 Log.write("Claude APIキーを保存")
             } catch {
                 let failed = NSAlert(); failed.messageText = error.localizedDescription; failed.runModal()
             }
         case .alertThirdButtonReturn:
             AnthropicKeychain.remove()
-            polishStatus = "仕上げ: 次の変換時にMaxログインを確認"
+            polishStatus = Self.readyStatus(for: settings.aiProvider)
             Log.write("Claude APIキーを削除")
+        default: break
+        }
+    }
+
+    /// 今の道で、次の変換で何を使うか（足りないものがあればそれ）を1行で出す。
+    static func readyStatus(for provider: AIProvider) -> String {
+        if let missing = Polisher.missingRequirement(provider) { return "仕上げ: ⚠️ \(provider.menuTitle) は " + shortMissing(provider, missing) }
+        switch provider {
+        case .claude: return AnthropicAPI.hasKey ? "仕上げ: APIキーで Claude を使う" : "仕上げ: 次の変換時にMaxログインを確認"
+        case .openAIAPI: return "仕上げ: OpenAI の APIキーを使う"
+        case .codexCLI: return "仕上げ: 次の変換時に Codex の ChatGPT ログインを確認"
+        }
+    }
+
+    static func shortMissing(_ provider: AIProvider, _ missing: Polisher.PolishError? = nil) -> String {
+        switch missing ?? Polisher.missingRequirement(provider) {
+        case .some(.cliMissing): return "APIキーも Claude Code も無し"
+        case .some(.openAIKeyMissing): return "APIキー未設定"
+        case .some(.codexMissing): return "codex 未インストール"
+        default: return "準備できていません"
+        }
+    }
+
+    /// 選んだものだけを使う。使えないときは別の会社の AI に切り替えず、足りないものを警告で出す。
+    @objc private func selectAIProvider(_ sender: NSMenuItem) {
+        guard state == .idle, let raw = sender.representedObject as? String, let provider = AIProvider(rawValue: raw) else { return }
+        settings.aiProvider = provider
+        settings.save()
+        Log.write("AI の仕上げに使うもの: \(provider.rawValue)")
+        polishStatus = Self.readyStatus(for: provider)
+        if let missing = Polisher.missingRequirement(provider) {
+            let alert = NSAlert()
+            alert.messageText = "\(provider.menuTitle) はまだ使えません"
+            alert.informativeText = (missing.errorDescription ?? "") + "\n選んだままにしています。準備ができるまで、通常モードの変換は AI 補正をせずに止まります（原文はクリップボードに残します）。"
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+        guard provider == .codexCLI else { return }
+        polishStatus = "仕上げ: Codex の ChatGPT ログインを確認中"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try Polisher.ensureSubscription(.codexCLI) }
+            DispatchQueue.main.async {
+                guard self.settings.aiProvider == .codexCLI else { return }
+                switch result {
+                case .success: self.polishStatus = "仕上げ: Codex CLI（ChatGPTログイン確認済み）"
+                case .failure(let error):
+                    self.polishStatus = "仕上げ: ⚠️ Codex CLI のログインを確認できません"
+                    let alert = NSAlert()
+                    alert.messageText = "Codex CLI を使えません"
+                    alert.informativeText = error.localizedDescription
+                    NSApp.activate(ignoringOtherApps: true)
+                    alert.runModal()
+                }
+            }
+        }
+    }
+
+    /// OpenAI の API キーもキーチェーンにだけ保存する（Claude のキーとは別の場所）。設定ファイル・ログには書かない。
+    @objc private func showOpenAIKeySettings() {
+        let alert = NSAlert()
+        alert.messageText = "OpenAI APIキー"
+        alert.informativeText = "OpenAI の管理画面（platform.openai.com の API keys）で発行したキー（sk- で始まる）を貼り付けてください。「AI の仕上げに使うもの」で「OpenAI（APIキー）」を選んだときだけ使います（使った分だけ OpenAI から請求されます）。ChatGPT のプランで使うときはキーは不要で、「OpenAI（Codex CLI・ChatGPTログイン）」を選びます。"
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        field.placeholderString = OpenAIAPI.hasKey ? "保存済み（変えるときだけ貼り付け）" : "sk-..."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "キャンセル")
+        if OpenAIAPI.hasKey { alert.addButton(withTitle: "キーを削除") }
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = field
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            let key = field.stringValue
+            guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            do {
+                try OpenAIKeychain.store(key)
+                polishStatus = Self.readyStatus(for: settings.aiProvider)
+                Log.write("OpenAI APIキーを保存")
+            } catch {
+                let failed = NSAlert(); failed.messageText = error.localizedDescription; failed.runModal()
+            }
+        case .alertThirdButtonReturn:
+            OpenAIKeychain.remove()
+            polishStatus = Self.readyStatus(for: settings.aiProvider)
+            Log.write("OpenAI APIキーを削除")
         default: break
         }
     }
@@ -724,8 +834,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         polished = try SentencePolisher.polish(result.text, polisher: Polisher(model: settings.polishModel, effort: settings.polishEffort), context: settings.shareScreenContextWithClaude ? context : nil, client: client, aliases: aliases, instructions: settings.customPolishInstructions, jevSettings: settings.jev, progress: progress)
                     }
                     if !polished.isEmpty { result.text = polished }
-                    let via = AnthropicAPI.hasKey ? "APIキー" : "Claude Code Max"
-                    DispatchQueue.main.async { self.polishStatus = settings.polishModel.contains("haiku") ? "仕上げ: \(via)（Haiku／思考量指定なし）" : "仕上げ: \(via)（\(settings.polishModel) / \(settings.polishEffort)）" }
+                    let via = settings.aiProvider.shortName
+                    let detail: String
+                    switch settings.aiProvider {
+                    case .claude: detail = settings.polishModel.contains("haiku") ? "Haiku／思考量指定なし" : "\(settings.polishModel) / \(settings.polishEffort)"
+                    case .openAIAPI, .codexCLI: detail = "\(settings.openAIModel) / \(settings.openAIEffort)"
+                    }
+                    DispatchQueue.main.async { self.polishStatus = "仕上げ: \(via)（\(detail)）" }
                 } catch {
                     DispatchQueue.main.async {
                         self.polishStatus = "仕上げ: 失敗（原文をコピー済み）"
@@ -812,9 +927,24 @@ extension AppDelegate {
         MeetingGoogleDrive.shared.connect { [weak self] result in
             switch result {
             case .success: self?.lastError = nil
-            case .failure(let error): self?.lastError = error.localizedDescription
+            case .failure(let error):
+                self?.lastError = error.localizedDescription
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Google連携を完了できませんでした"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "閉じる")
+                alert.runModal()
             }
             self?.updateStatusIcon()
+        }
+    }
+    @objc private func diagnoseScreenContext() {
+        guard Settings.load().useScreenContext else { return }
+        let target = NSWorkspace.shared.frontmostApplication
+        DispatchQueue.global(qos: .userInitiated).async {
+            let context = ScreenContext.capture(app: target)
+            Log.write("常駐画面診断 app=\(target?.bundleIdentifier ?? "unknown") chars=\(context?.focusedText.count ?? 0)（本文非保存）")
         }
     }
     @objc private func openMeetingList() { if let url = MeetingGoogleDrive.shared.folderURL { NSWorkspace.shared.open(url) } }
