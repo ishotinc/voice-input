@@ -29,7 +29,8 @@ struct ClientContext {
     func initialPrompt(dictionary: String, screen: ScreenContext?, aliases: [String: String] = [:]) -> String {
         let names = validatedAliases(aliases).values.sorted()
         let hints = (names + vocabulary + (screen?.vocabulary ?? [])).joined(separator: "、")
-        return String(dictionary.prefix(200)) + "\n参考表記: " + String(hints.prefix(150))
+        // ラベル語（「参考表記:」）は出力に漏れるので付けない
+        return String(dictionary.prefix(200)) + (hints.isEmpty ? "" : "\n" + String(hints.prefix(150)))
     }
 
     static func load(folderPath: String, maxFiles: Int = 10, maxCharacters: Int = 12000, maxBytes: Int = 200000, perFileBytes: Int = 32000, timeBudget: TimeInterval = 0.6) -> ClientContext {

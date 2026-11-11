@@ -253,7 +253,8 @@ struct Formatter {
 /// whisper が無音・小さい音に対して出す決まり文句。
 /// 動画の字幕で学習しているため、静かな部屋で録るとこれが出る（実測: peak=0.017 の部屋で
 /// 「ご視聴ありがとうございました。」が出た）。指示として話す言葉ではないので、
-/// 出力全体がこれと一致したときだけ捨てる。部分一致では消さない。
+/// isOnly は出力全体がこれと一致したときだけ捨てる。strip は本文の先頭・末尾に独立した1文として
+/// 付いた取り違えようのない句（edgePhrases）だけを外す。文の途中の部分一致では消さない。
 enum Hallucination {
     static let phrases: Set<String> = [
         "ご視聴ありがとうございました",
@@ -277,6 +278,76 @@ enum Hallucination {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return false }
         return phrases.contains(t)
+    }
+
+    /// 本文の先頭・末尾に独立した1文として付いたら外す決まり文句（実例: 本文3行のあとに改行して
+    /// 「ご視聴ありがとうございました」が付いた）。取り違えようのない句だけを置く。
+    /// 「ありがとうございました」「おやすみなさい」などはメール口述で本当に言うので入れない（isOnly だけで扱う）。
+    /// 比べるときは文末の句読点と空白を外し、英字は小文字にそろえる。
+    static let edgePhrases: Set<String> = [
+        "ご視聴ありがとうございました",
+        "ご視聴いただきありがとうございました",
+        "最後までご視聴いただきありがとうございました",
+        "最後までご視聴ありがとうございました",
+        "チャンネル登録お願いします",
+        "チャンネル登録をお願いします",
+        "チャンネル登録よろしくお願いします",
+        "チャンネル登録をよろしくお願いします",
+        "字幕視聴者",
+        "thanks for watching",
+    ]
+
+    private static let sentenceEnds: Set<Character> = ["。", "！", "？", "!", "?"]
+    private static let trailingMarks = CharacterSet(charactersIn: "。．.！？!?、， 　").union(.whitespacesAndNewlines)
+
+    /// 先頭・末尾にある、独立した1文（改行・。・！・？区切り）が決まり文句そのものなら外す。
+    /// 「ご視聴ありがとうございましたと書いて」のように文の一部なら消さない。全部外れたら空文字。
+    static func strip(_ text: String) -> String {
+        var units: [String] = []
+        var current = ""
+        for ch in text {
+            current.append(ch)
+            if ch == "\n" || ch == "\r\n" || sentenceEnds.contains(ch) {
+                units.append(current); current = ""
+            }
+        }
+        if !current.isEmpty { units.append(current) }
+        func isPhrase(_ unit: String) -> Bool {
+            edgePhrases.contains(unit.trimmingCharacters(in: trailingMarks).lowercased())
+        }
+        func isBlank(_ unit: String) -> Bool { unit.trimmingCharacters(in: trailingMarks).isEmpty }
+        // 空の区切り（改行だけの行など）は飛ばして、その外側の文を見る
+        while let first = units.first, isBlank(first) || isPhrase(first) { units.removeFirst() }
+        while let last = units.last, isBlank(last) || isPhrase(last) { units.removeLast() }
+        return units.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// whisper の初期プロンプトのラベル語が出力の先頭に漏れたら外す
+    /// （実例:「固有名詞共有フォルダ?の件に関して…」）。ラベルのすぐ後がひらがななら
+    /// 「固有名詞はそのまま」のように本当に話した言葉とみなして残す。
+    static func stripPromptLeak(_ text: String) -> String {
+        let labels = ["以下は日本語の作業指示です", "固有名詞", "参考表記"]
+        let separators = CharacterSet(charactersIn: "。:：、, 　").union(.whitespacesAndNewlines)
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var changed = true
+        while changed {
+            changed = false
+            for label in labels where t.hasPrefix(label) {
+                let rest = t.dropFirst(label.count)
+                let hadSeparator = rest.first.map { String($0).rangeOfCharacter(from: separators) != nil } ?? true
+                if !hadSeparator, let next = rest.unicodeScalars.first, (0x3041...0x309F).contains(next.value) { continue }
+                // 末尾の「。」は本文のものなので、先頭側の区切りだけ外す
+                t = String(String(rest).unicodeScalars.drop(while: { separators.contains($0) }))
+                changed = true
+            }
+        }
+        return t
+    }
+
+    /// whisper の生の結果に掛ける後処理。プロンプトの漏れと先頭・末尾の決まり文句を外す。
+    /// 空になったら呼び出し側は isOnly と同じく捨てる。
+    static func clean(_ text: String) -> String {
+        strip(stripPromptLeak(text))
     }
 }
 

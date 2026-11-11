@@ -20,9 +20,20 @@ enum Paths {
         if !fm.fileExists(atPath: terms.path), let bundled = bundledTerms() {
             try? fm.copyItem(at: bundled, to: terms)
         }
-        // 前回落ちたときに残った音声を掃除する（長期保存しない）
-        if let leftovers = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
-            for f in leftovers { try? fm.removeItem(at: f) }
+        removeStaleTemporaryFiles(in: tmp)
+    }
+
+    /// 前回落ちたときに残った音声を掃除する（長期保存しない）。
+    /// bootstrap は別のプロセスや録音中の操作からも呼ばれる。録音中のファイルを消さないよう、
+    /// しばらく書き込まれていないものだけを消す。
+    static func removeStaleTemporaryFiles(in folder: URL, now: Date = Date(), olderThan seconds: TimeInterval = 600) {
+        let fm = FileManager.default
+        let key: URLResourceKey = .contentModificationDateKey
+        guard let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [key]) else { return }
+        for file in files {
+            guard let modified = (try? file.resourceValues(forKeys: [key]))?.contentModificationDate,
+                  now.timeIntervalSince(modified) >= seconds else { continue }
+            try? fm.removeItem(at: file)
         }
     }
 

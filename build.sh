@@ -1,5 +1,5 @@
 #!/bin/bash
-# VoiceInput.app を組み立てる。ビルド → .app 化 → ad-hoc 署名まで。
+# VoiceInput.app を組み立てる。更新時はインストール済みアプリの署名を維持する。
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -29,8 +29,19 @@ cp Resources/meeting-diarize.py "$APP/Contents/Resources/meeting-diarize.py"
 # 環境変数 VOICEINPUT_IDENTITY で明示指定もできる。
 IDENTITY="${VOICEINPUT_IDENTITY:-}"
 if [ -z "$IDENTITY" ]; then
-  IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-    | awk '/Apple Development|Developer ID Application/ {print $2; exit}')
+  INSTALLED_APP="$HOME/Applications/VoiceInput.app"
+  INSTALLED_AUTHORITY=$(codesign -dv --verbose=4 "$INSTALLED_APP" 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true)
+  AVAILABLE_IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null)
+  if [ -n "$INSTALLED_AUTHORITY" ]; then
+    IDENTITY=$(printf '%s\n' "$AVAILABLE_IDENTITIES" | awk -F '"' -v authority="$INSTALLED_AUTHORITY" '$2 == authority {split($1, fields, " "); print fields[2]; exit}')
+    if [ -z "$IDENTITY" ]; then
+      echo "既存アプリの署名証明書が利用できません: $INSTALLED_AUTHORITY" >&2
+      echo "権限を失わないよう中止します。署名変更が必要な場合のみ VOICEINPUT_IDENTITY を指定してください。" >&2
+      exit 1
+    fi
+  else
+    IDENTITY=$(printf '%s\n' "$AVAILABLE_IDENTITIES" | awk '/Apple Development|Developer ID Application|Apple Distribution/ {print $2; exit}')
+  fi
 fi
 
 mkdir -p "$APP/Contents/Resources"
@@ -76,7 +87,7 @@ if echo "$PERM" | grep -qE "マイク=×|アクセシビリティ=×"; then
   このアプリはアドホック署名（codesign -s -）なので、ビルドし直すたびに署名が変わり、
   macOS は「別のアプリ」とみなして許可を捨てます。実測で確認済み（2026-09-04）。
 
-  ビルド後は毎回、メニューバーのアイコン →「権限を確認…」から入れ直してください。
+  ビルド後は毎回、メニューバーのアイコン →「設定…」→「一般」→「権限を確認…」から入れ直してください。
   古い許可が残って外せないときは:
       tccutil reset Microphone com.ishot.voice-input
       tccutil reset Accessibility com.ishot.voice-input

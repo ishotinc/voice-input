@@ -96,6 +96,7 @@ final class MeetingController {
         results.forEach { print("\($0.1 ? "PASS" : "FAIL"): \($0.0)") }
         return results.allSatisfy { $0.1 }
     }
+    func suspendBackgroundRetry() { retryTimer?.invalidate() }
     func stop() { active?.stop() }
     func observeParticipants(_ frames: [MeetingPresence]) { active?.observeParticipants(frames) }
     func setSelfDisplayName(_ name: String) { active?.setSelfDisplayName(name) }

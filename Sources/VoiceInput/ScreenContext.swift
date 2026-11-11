@@ -24,9 +24,10 @@ struct ScreenContext {
             .prefix(32).map { $0 }
     }
 
+    /// ラベル語（「参考表記:」）は出力に漏れるので付けず、改行のあとに語を「、」で並べるだけにする。
     func initialPrompt(dictionary: String) -> String {
         let hints = vocabulary.joined(separator: "、")
-        return String(dictionary.prefix(240)) + (hints.isEmpty ? "" : "\n参考表記: " + String(hints.prefix(110)))
+        return String(dictionary.prefix(240)) + (hints.isEmpty ? "" : "\n" + String(hints.prefix(110)))
     }
 
     static func capture(app: NSRunningApplication?, allowOwnProcess: Bool = false) -> ScreenContext? {

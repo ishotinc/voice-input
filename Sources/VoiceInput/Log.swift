@@ -9,9 +9,13 @@ enum Log {
         return f
     }()
 
+    /// 試験用。true のあいだは常駐アプリのログファイルに書かない。
+    nonisolated(unsafe) static var testSkipsFile = false
+
     static func write(_ message: String) {
         let line = "[\(formatter.string(from: Date()))] \(message)\n"
         FileHandle.standardError.write(line.data(using: .utf8)!)
+        guard !testSkipsFile else { return }
         queue.async {
             guard let data = line.data(using: .utf8) else { return }
             if let handle = try? FileHandle(forWritingTo: Paths.log) {

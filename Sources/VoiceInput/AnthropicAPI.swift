@@ -13,6 +13,11 @@ enum AnthropicKeychain {
               let key = String(data: data, encoding: .utf8), !key.isEmpty else { return nil }
         return key
     }
+    /// キーの有無だけを見る。中身を受け取らないので、定期の確認で許可の画面を出さない。
+    static var exists: Bool {
+        var q = query; q[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
+    }
     static func store(_ key: String) throws {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.hasPrefix("sk-ant-") else { throw AnthropicAPI.Failure.invalidKey }
@@ -42,13 +47,16 @@ enum AnthropicAPI {
         }
     }
 
-    static var hasKey: Bool { AnthropicKeychain.read() != nil }
+    /// 試験用。true のあいだはキーチェーンを読まず「キーなし」として動く。
+    nonisolated(unsafe) static var testHidesKey = false
+    static var hasKey: Bool { !testHidesKey && AnthropicKeychain.read() != nil }
+    static var keyExists: Bool { !testHidesKey && AnthropicKeychain.exists }
 
     /// 1回の問い合わせ。返すのはテキスト部分だけ。音声は送らない（送るのは文字にした内容と、呼び出し側が渡した参考情報のみ）。
     static func complete(system: String, input: String, model: String, effort: String?, maxTokens: Int = 16000,
                          timeout: TimeInterval, stage: String, cancelled: (() -> Bool)? = nil, key overrideKey: String? = nil) throws -> String {
         guard let key = overrideKey ?? AnthropicKeychain.read() else { throw Polisher.PolishError.cliMissing }
-        guard input.utf8.count <= 128_000 else { throw Polisher.PolishError.badResponse }
+        guard input.utf8.count <= 128_000 else { throw Polisher.rejected("Claude API", "入力が128000バイト超") }
         let started = ProcessInfo.processInfo.systemUptime
         defer { Log.write(String(format: "API %@ 完了まで %.3f秒", stage, ProcessInfo.processInfo.systemUptime - started)) }
         var body: [String: Any] = [
@@ -81,7 +89,7 @@ enum AnthropicAPI {
             if (error as? URLError)?.code == .timedOut { throw Polisher.PolishError.timedOut }
             throw error
         }
-        guard let http = box.response as? HTTPURLResponse, let data = box.data else { throw Polisher.PolishError.badResponse }
+        guard let http = box.response as? HTTPURLResponse, let data = box.data else { throw Polisher.rejected("Claude API", "応答なし") }
         guard http.statusCode == 200 else { throw Failure.http(http.statusCode, errorMessage(data)) }
         return try parseText(data)
     }
@@ -95,16 +103,16 @@ enum AnthropicAPI {
     /// end_turn で終わったテキストだけを採る。途中で切れた応答や拒否は貼り付けない。
     static func parseText(_ data: Data) throws -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let content = json["content"] as? [[String: Any]] else { throw Polisher.PolishError.badResponse }
+              let content = json["content"] as? [[String: Any]] else { throw Polisher.rejected("Claude API", "形が不正") }
         switch json["stop_reason"] as? String {
         case "end_turn", "stop_sequence": break
         case "refusal": throw Failure.refusal
         case "max_tokens": throw Failure.truncated
-        default: throw Polisher.PolishError.badResponse
+        default: throw Polisher.rejected("Claude API", "stop_reason=\(json["stop_reason"] as? String ?? "なし")")
         }
         let text = content.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }.joined()
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count < 32000 else { throw Polisher.PolishError.badResponse }
+        guard !trimmed.isEmpty, trimmed.count < 32000 else { throw Polisher.rejected("Claude API", "本文\(trimmed.count)字") }
         return trimmed
     }
 }

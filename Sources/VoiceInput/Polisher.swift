@@ -40,8 +40,14 @@ struct Polisher {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// 試験用。実物の claude の代わりに偽のコマンドを使う。
+    nonisolated(unsafe) static var testCLIPath: String?
+    /// 音声入力の1回の問い合わせの上限。接続が切れて応答が来ないときに、待ち続けない。
+    static let dictationAttemptTimeout: TimeInterval = 120
+
     static var cliPath: String? {
-        [NSHomeDirectory() + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+        if let testCLIPath { return testCLIPath }
+        return [NSHomeDirectory() + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
@@ -54,22 +60,29 @@ struct Polisher {
     }
 
     enum PolishError: LocalizedError {
-        case cliMissing, maxLoginRequired, timedOut, badResponse, cancelled
+        case cliMissing, maxLoginRequired, timedOut, badResponse, cancelled, usageLimit
         case openAIKeyMissing, codexMissing, codexLoginRequired, codexAPIKeyLogin, codexFailed(String)
         var errorDescription: String? {
             switch self {
             case .cancelled: return "先行処理を終了しました。"
-            case .cliMissing: return "Claude を使う準備ができていません。メニューの「Claude APIキーを設定…」でキーを入れるか、Claude Code に Max プランでログインしてください。"
+            case .cliMissing: return "Claude を使う準備ができていません。設定の「AI」タブの「Claude APIキー」でキーを入れるか、Claude Code に Max プランでログインしてください。"
             case .maxLoginRequired: return "Claude Code の Max プランへのログインを確認できません。仕上げを中止しました。"
             case .timedOut: return "AI の応答が時間内に届きませんでした。"
+            case .usageLimit: return "Claude の利用上限に達しました。解除されるまで AI 補正はできません。"
             case .badResponse: return "AI の仕上げ結果を確認できませんでした。"
-            case .openAIKeyMissing: return "OpenAI の API キーがありません。メニューの「OpenAI APIキーを設定…」でキーを入れてください（Claude には切り替えていません）。"
+            case .openAIKeyMissing: return "OpenAI の API キーがありません。設定の「AI」タブの「OpenAI APIキー」でキーを入れてください（Claude には切り替えていません）。"
             case .codexMissing: return "Codex CLI が見つかりません。ターミナルで npm i -g @openai/codex を実行して入れてください（Claude には切り替えていません）。"
             case .codexLoginRequired: return "Codex CLI に ChatGPT でログインしていません。ターミナルで codex login を実行してください（Claude には切り替えていません）。"
             case .codexAPIKeyLogin: return "Codex CLI が ChatGPT ではなく API キーでログインしています。ChatGPT のプランで使うときは codex login をやり直すか、「OpenAI（APIキー）」を選んでください。"
             case .codexFailed(let message): return "Codex CLI が応答を作れませんでした: \(message)"
             }
         }
+    }
+
+    /// 応答を弾く場所ごとに理由をログへ残す。話した内容・本文は渡さない。
+    static func rejected(_ place: String, _ reason: String) -> PolishError {
+        Log.write("AI応答を不正と判定[\(place)]: \(reason)")
+        return .badResponse
     }
 
     /// One in-flight preflight is shared by recording warm-up and finishing. Success expires quickly.
@@ -115,8 +128,13 @@ struct Polisher {
             lock.lock()
             let result = attempt.result
             lock.unlock()
-            guard let result else { throw PolishError.badResponse }
+            guard let result else { throw Polisher.rejected("認証確認", "結果が空") }
             try result.get()
+        }
+
+        /// 覚えている確認結果を捨てる。次の確認は必ずやり直す。
+        func invalidate() {
+            lock.lock(); current = nil; lock.unlock()
         }
     }
 
@@ -127,6 +145,11 @@ struct Polisher {
     /// Safe to call from the main thread when recording starts; immediately schedules nonblocking preflight.
     static func prepareAuthentication(_ provider: AIProvider = AIRoute.current().provider) {
         authentications[provider]!.prepare { try checkAuthentication(provider) }
+    }
+
+    /// 再接続のとき、前回の「確認済み」を使わずに認証を取り直す。
+    static func resetAuthentication(_ provider: AIProvider = AIRoute.current().provider) {
+        authentications[provider]!.invalidate()
     }
 
     static func ensureSubscription(_ provider: AIProvider = AIRoute.current().provider) throws {
@@ -153,13 +176,33 @@ struct Polisher {
         }
     }
 
+    /// 定期の確認用。補正は呼ばず、ログイン状態とキーの有無だけを見る。結果は覚えない。
+    static func lightAuthenticationCheck(_ provider: AIProvider) throws {
+        switch provider {
+        case .claude:
+            if AnthropicAPI.keyExists { return }
+            try checkClaudeLogin()
+        case .openAIAPI: guard OpenAIAPI.keyExists else { throw PolishError.openAIKeyMissing }
+        case .codexCLI: try CodexCLI.checkLogin()
+        }
+    }
+
     private static func checkClaudeAuthentication() throws {
         if AnthropicAPI.hasKey { return }
+        try checkClaudeLogin()
+    }
+
+    private static func checkClaudeLogin() throws {
         let started = ProcessInfo.processInfo.systemUptime
         defer { Log.write(String(format: "Claude認証確認 %.3f秒", ProcessInfo.processInfo.systemUptime - started)) }
         guard let path = cliPath else { throw PolishError.cliMissing }
-        let auth = try runCLI(path: path, arguments: ["--safe-mode", "auth", "status"], timeout: 8, stage: "認証")
-        guard isMaxAuthentication(auth) else { throw PolishError.maxLoginRequired }
+        // 未ログインだと JSON を出して終了コード 1 で終わる。出力で判定する（ログイン切れを応答不正にしない）。
+        let auth = try runCLI(path: path, arguments: ["--safe-mode", "auth", "status"], timeout: 8, stage: "認証", acceptFailureExit: true)
+        guard (try? JSONSerialization.jsonObject(with: auth)) is [String: Any] else { throw rejected("認証確認", "JSONでない出力 \(auth.count)バイト") }
+        guard isMaxAuthentication(auth) else {
+            Log.write("Claude認証確認: Max のログインなし")
+            throw PolishError.maxLoginRequired
+        }
     }
 
     static func isMaxAuthentication(_ data: Data) -> Bool {
@@ -180,30 +223,62 @@ struct Polisher {
         return nil
     }
 
+    /// Claude Code が失敗を結果として返したときの分類。ログイン切れ・利用上限は「応答不正」と分ける。
+    /// 実測（2.1.316）: is_error=true・assistant の error=authentication_failed・api_error_status=null で終了コード 1。
+    static func claudeFailure(_ result: [String: Any], events: [[String: Any]]) -> PolishError? {
+        guard result["is_error"] as? Bool == true else { return nil }
+        let codes = events.compactMap { $0["error"] as? String }
+        let status = result["api_error_status"] as? Int
+        let text = (result["result"] as? String ?? "").lowercased()
+        func mentions(_ words: [String]) -> Bool { words.contains { text.contains($0) } }
+        if codes.contains("authentication_failed") || status == 401 || status == 403
+            || mentions(["failed to authenticate", "not logged in", "/login"]) {
+            Log.write("Claude Code の失敗: ログイン切れ（status=\(status.map(String.init) ?? "なし")）")
+            return .maxLoginRequired
+        }
+        if codes.contains("rate_limit") || status == 429 || mentions(["hit your limit", "usage limit"]) {
+            Log.write("Claude Code の失敗: 利用上限（status=\(status.map(String.init) ?? "なし")）")
+            return .usageLimit
+        }
+        return nil
+    }
+
+    /// ログに出す応答の形。本文は含めない。
+    private static func resultShape(_ json: [String: Any], events: [[String: Any]]) -> String {
+        let codes = events.compactMap { $0["error"] as? String }.joined(separator: ",")
+        return "type=\(json["type"] as? String ?? "なし") subtype=\(json["subtype"] as? String ?? "なし") is_error=\(json["is_error"] as? Bool ?? false)"
+            + " status=\((json["api_error_status"] as? Int).map(String.init) ?? "なし") stop=\(json["stop_reason"] as? String ?? "なし")"
+            + " error=\(codes.isEmpty ? "なし" : codes) 本文\((json["result"] as? String)?.count ?? 0)字"
+    }
+
     static func parseResult(_ data: Data) throws -> String {
         let json: [String: Any]
+        var events: [[String: Any]] = []
         if let single = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             json = single
+            events = [single]
         } else {
             let lines = data.split(separator: 10).filter { !$0.allSatisfy { $0 == 13 || $0 == 32 || $0 == 9 } }
-            guard !lines.isEmpty else { throw PolishError.badResponse }
-            var events: [[String: Any]] = []
+            guard !lines.isEmpty else { throw rejected("Claude Code", "出力なし") }
             for line in lines {
-                guard let event = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { throw PolishError.badResponse }
+                guard let event = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { throw rejected("Claude Code", "JSONでない行 全\(lines.count)行") }
                 if let stream = event["event"] as? [String: Any],
                    let delta = stream["delta"] as? [String: Any], delta["stop_reason"] as? String == "max_tokens" {
-                    throw PolishError.badResponse
+                    throw rejected("Claude Code", "出力上限で途中終了")
                 }
                 events.append(event)
             }
-            guard let last = events.last, last["type"] as? String == "result",
-                  events.filter({ $0["type"] as? String == "result" }).count == 1 else { throw PolishError.badResponse }
+            let results = events.filter { $0["type"] as? String == "result" }.count
+            guard let last = events.last, last["type"] as? String == "result", results == 1 else {
+                throw rejected("Claude Code", "結果イベントが\(results)件・最後のイベント=\(events.last?["type"] as? String ?? "なし")")
+            }
             json = last
         }
+        if let failure = claudeFailure(json, events: events) { throw failure }
         guard json["type"] as? String == "result", json["subtype"] as? String == "success",
               json["is_error"] as? Bool == false,
               let result = json["result"] as? String, !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              result.count < 32000, json["stop_reason"] as? String != "max_tokens" else { throw PolishError.badResponse }
+              result.count < 32000, json["stop_reason"] as? String != "max_tokens" else { throw rejected("Claude Code", resultShape(json, events: events)) }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -221,7 +296,7 @@ struct Polisher {
                        keepStderr: Bool = false, acceptFailureExit: Bool = false) throws -> Data {
         let started = ProcessInfo.processInfo.systemUptime
         defer { Log.write(String(format: "実行 %@ 完了まで %.3f秒", stage, ProcessInfo.processInfo.systemUptime - started)) }
-        guard input.utf8.count <= 128_000 else { throw PolishError.badResponse }
+        guard input.utf8.count <= 128_000 else { throw rejected("実行 \(stage)", "入力が128000バイト超") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
@@ -301,11 +376,13 @@ struct Polisher {
                 throw PolishError.timedOut
             }
         }
-        guard drained.wait(timeout: .now() + 2) == .success, process.terminationStatus == 0 || acceptFailureExit else {
-            throw PolishError.badResponse
-        }
+        guard drained.wait(timeout: .now() + 2) == .success else { throw rejected("実行 \(stage)", "出力を読み切れない") }
         buffer.lock.lock(); defer { buffer.lock.unlock() }
-        guard !buffer.overflow else { throw PolishError.badResponse }
+        if process.terminationStatus != 0 {
+            Log.write("実行 \(stage) 終了コード=\(process.terminationStatus) 出力\(buffer.data.count)バイト")
+            guard acceptFailureExit else { throw rejected("実行 \(stage)", "終了コード\(process.terminationStatus)") }
+        }
+        guard !buffer.overflow else { throw rejected("実行 \(stage)", "出力が1000000バイト超") }
         return buffer.data
     }
 
@@ -364,7 +441,7 @@ struct Polisher {
             "--safe-mode", "-p", "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}",
             "--disable-slash-commands", "--no-session-persistence", "--model", model,
             "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--max-turns", "1", "--system-prompt", system
-        ] + (model.contains("haiku") ? [] : ["--effort", effort]), input: payload, timeout: remaining, stage: "仕上げ", cancelled: cancelled)
+        ] + (model.contains("haiku") ? [] : ["--effort", effort]), input: payload, timeout: remaining, stage: "仕上げ", cancelled: cancelled, acceptFailureExit: true)
         return try Self.parseResult(output)
     }
 }

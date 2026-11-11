@@ -49,7 +49,7 @@ enum SentencePolisher {
                     state.lock.unlock()
                     do {
                         let value = try transform(index, sentences[index])
-                        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw Polisher.PolishError.badResponse }
+                        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw Polisher.rejected("文ごとの補正", "空の結果 文\(index + 1)") }
                         state.lock.lock(); state.results[index] = value; state.lock.unlock()
                     } catch {
                         state.lock.lock(); if state.error == nil { state.error = error }; state.lock.unlock()
@@ -60,12 +60,12 @@ enum SentencePolisher {
         }
         group.wait()
         if let error = state.error { throw error }
-        guard state.results.allSatisfy({ $0 != nil }) else { throw Polisher.PolishError.badResponse }
+        guard state.results.allSatisfy({ $0 != nil }) else { throw Polisher.rejected("文ごとの補正", "結果の抜け") }
         return state.results.map { $0! }
     }
 
     static func polish(_ text: String, polisher: Polisher, context: ScreenContext?, client: ClientContext?,
-                       aliases: [String: String], instructions: String, jevSettings: JevSettings = JevSettings(), progress: @escaping (Int, Int) -> Void = { _, _ in }) throws -> String {
+                       aliases: [String: String], instructions: String, jevSettings: JevSettings = JevSettings(), status: ((String) -> Void)? = nil, progress: @escaping (Int, Int) -> Void = { _, _ in }) throws -> String {
         let sentences = split(text)
         let jev = IncrementalCorrection()
         defer { jev.cancel() }
@@ -76,7 +76,11 @@ enum SentencePolisher {
         }
         guard text.count >= 120, sentences.count > 1 else {
             progress(0, 1)
-            let value = try polisher.polish(text, context: context, client: client, aliases: aliases, instructions: instructions, neighboringSpeech: advice(text, ""))
+            let neighbors = advice(text, "")
+            let value = try PolishRecovery.run(status: status) {
+                try polisher.polish(text, context: context, client: client, aliases: aliases, instructions: instructions,
+                                    timeout: Polisher.dictationAttemptTimeout, neighboringSpeech: neighbors)
+            }
             progress(1, 1)
             return value
         }
@@ -88,9 +92,13 @@ enum SentencePolisher {
         let results = try map(sentences) { index, sentence in
             let before = index > 0 ? String(sentences[index - 1].suffix(400)) : ""
             let after = index + 1 < sentences.count ? String(sentences[index + 1].prefix(400)) : ""
-            let value = try polisher.polish(sentence, context: context, client: client, aliases: aliases,
-                                      instructions: instructions + "\nこれは長い発話の一文です。番号や箇条書き記号は保持し、前後の文を出力に混ぜないでください。",
-                                      neighboringSpeech: "前の文: " + before + "\n次の文: " + after + "\n" + advice(sentence, before + "\n" + after))
+            let neighbors = "前の文: " + before + "\n次の文: " + after + "\n" + advice(sentence, before + "\n" + after)
+            // 失敗した文だけを再試行する。他の文の結果はそのまま使う。
+            let value = try PolishRecovery.run(status: status) {
+                try polisher.polish(sentence, context: context, client: client, aliases: aliases,
+                                    instructions: instructions + "\nこれは長い発話の一文です。番号や箇条書き記号は保持し、前後の文を出力に混ぜないでください。",
+                                    timeout: Polisher.dictationAttemptTimeout, neighboringSpeech: neighbors)
+            }
             progressLock.lock(); completed += 1; progress(completed, sentences.count); progressLock.unlock()
             return value
         }

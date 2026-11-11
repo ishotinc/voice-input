@@ -33,18 +33,18 @@ curl -L -o ~/.voice-input/models/ggml-large-v3-turbo-q5_0.bin \
 
 AI はシステム設定を代わりに操作しない。利用者に次を頼む。
 
-1. メニューバーの音声入力のアイコン →「権限を確認…」
+1. メニューバーの音声入力のアイコン →「設定…」→「一般」タブの「権限を確認…」
 2. 「マイク」と「アクセシビリティ」で VoiceInput をオンにする
 
 確かめ方: `./finish-setup.sh` を実行し、案内どおりに ⌥Space で話してもらう。
 
 ## AI 補正（任意）
 
-次のどれかを利用者に選んでもらい、メニュー「AI の仕上げに使うもの」で同じものを選んでもらう。AI は API キーを代わりに入力せず、ログインも代わりにしない。
+次のどれかを利用者に選んでもらい、「設定…」の「AI」タブの「接続先」で同じものを選んでもらう。AI は API キーを代わりに入力せず、ログインも代わりにしない。
 
-- Claude（Anthropic の API キー）: メニュー「Claude APIキーを設定…」に利用者自身が貼り付ける
+- Claude（Anthropic の API キー）: 「設定…」の「AI」タブの「APIキー」から、利用者自身が貼り付ける
 - Claude（Claude Code の Max プラン）: 利用者がターミナルで `claude` を開いてログインする
-- OpenAI（API キー）: メニュー「OpenAI APIキーを設定…」に利用者自身が貼り付ける
+- OpenAI（API キー）: 「設定…」の「AI」タブの「APIキー」から、利用者自身が貼り付ける
 - OpenAI（Codex・ChatGPT のプラン）: `npm i -g @openai/codex` で入れ、利用者が `codex login` で ChatGPT のアカウントにログインする
 
 ## 守ること

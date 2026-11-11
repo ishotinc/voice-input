@@ -20,6 +20,11 @@ enum OpenAIKeychain {
               let key = String(data: data, encoding: .utf8), !key.isEmpty else { return nil }
         return key
     }
+    /// キーの有無だけを見る。中身を受け取らないので、定期の確認で許可の画面を出さない。
+    static var exists: Bool {
+        var q = query; q[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
+    }
     static func store(_ key: String) throws {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
         // 形式の確認はキーチェーンに触る前に行う（自己テストで不正なキーを書き込まないため）。
@@ -52,7 +57,10 @@ enum OpenAIAPI {
         }
     }
 
-    static var hasKey: Bool { OpenAIKeychain.read() != nil }
+    /// 試験用。true のあいだはキーチェーンを読まず「キーなし」として動く。
+    nonisolated(unsafe) static var testHidesKey = false
+    static var hasKey: Bool { !testHidesKey && OpenAIKeychain.read() != nil }
+    static var keyExists: Bool { !testHidesKey && OpenAIKeychain.exists }
     static let endpoint = URL(string: "https://api.openai.com/v1/responses")!
 
     /// 送る本文。store=false で応答を OpenAI 側に保存させない。ツールは渡さない。
@@ -69,7 +77,7 @@ enum OpenAIAPI {
     static func complete(system: String, input: String, model: String, effort: String?, maxOutputTokens: Int = 16000,
                          timeout: TimeInterval, stage: String, cancelled: (() -> Bool)? = nil, key overrideKey: String? = nil) throws -> String {
         guard let key = overrideKey ?? OpenAIKeychain.read() else { throw Polisher.PolishError.openAIKeyMissing }
-        guard input.utf8.count <= 128_000 else { throw Polisher.PolishError.badResponse }
+        guard input.utf8.count <= 128_000 else { throw Polisher.rejected("OpenAI API", "入力が128000バイト超") }
         let started = ProcessInfo.processInfo.systemUptime
         defer { Log.write(String(format: "OpenAI API %@ 完了まで %.3f秒", stage, ProcessInfo.processInfo.systemUptime - started)) }
         var request = URLRequest(url: endpoint)
@@ -96,7 +104,7 @@ enum OpenAIAPI {
             if (error as? URLError)?.code == .timedOut { throw Polisher.PolishError.timedOut }
             throw error
         }
-        guard let http = box.response as? HTTPURLResponse, let data = box.data else { throw Polisher.PolishError.badResponse }
+        guard let http = box.response as? HTTPURLResponse, let data = box.data else { throw Polisher.rejected("OpenAI API", "応答なし") }
         guard http.statusCode == 200 else { throw Failure.http(http.statusCode, errorMessage(data)) }
         return try parseText(data)
     }
@@ -115,7 +123,7 @@ enum OpenAIAPI {
     /// status=completed の応答の output_text だけを採る。途中で切れた応答・拒否・失敗・ツール呼び出しは貼り付けない。
     static func parseText(_ data: Data) throws -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let output = json["output"] as? [[String: Any]] else { throw Polisher.PolishError.badResponse }
+              let output = json["output"] as? [[String: Any]] else { throw Polisher.rejected("OpenAI API", "形が不正") }
         switch json["status"] as? String {
         case "completed": break
         case "incomplete":
@@ -124,7 +132,7 @@ enum OpenAIAPI {
         case "failed":
             let message = ((json["error"] as? [String: Any])?["message"] as? String).map(redactKeys) ?? "詳細不明"
             throw Failure.failed(String(message.prefix(200)))
-        default: throw Polisher.PolishError.badResponse
+        default: throw Polisher.rejected("OpenAI API", "status=\(json["status"] as? String ?? "なし")")
         }
         var text = ""
         for item in output {
@@ -136,14 +144,14 @@ enum OpenAIAPI {
                     switch part["type"] as? String {
                     case "output_text": text += part["text"] as? String ?? ""
                     case "refusal": throw Failure.refusal
-                    default: throw Polisher.PolishError.badResponse
+                    default: throw Polisher.rejected("OpenAI API", "想定外の本文 \(part["type"] as? String ?? "なし")")
                     }
                 }
-            default: throw Polisher.PolishError.badResponse   // ツールは渡していない。想定外の項目は使わない。
+            default: throw Polisher.rejected("OpenAI API", "想定外の項目 \(item["type"] as? String ?? "なし")")   // ツールは渡していない。想定外の項目は使わない。
             }
         }
         let trimmed = AIText.unwrapWholeCodeFence(text.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard !trimmed.isEmpty, trimmed.count < 32000 else { throw Polisher.PolishError.badResponse }
+        guard !trimmed.isEmpty, trimmed.count < 32000 else { throw Polisher.rejected("OpenAI API", "本文\(trimmed.count)字") }
         return trimmed
     }
 }

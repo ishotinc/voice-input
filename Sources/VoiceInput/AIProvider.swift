@@ -55,8 +55,11 @@ struct AIRoute {
 ///   --ignore-user-config（~/.codex/config.toml を読まない。認証は CODEX_HOME のまま）/ --ignore-rules / --skip-git-repo-check
 ///   codex login status … ChatGPT なら標準エラーに「Logged in using ChatGPT」、未ログインは「Not logged in」で終了コード 1
 enum CodexCLI {
+    /// 試験用。実物の codex の代わりに偽のコマンドを使う。
+    nonisolated(unsafe) static var testPath: String?
     static var path: String? {
-        [NSHomeDirectory() + "/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+        if let testPath { return testPath }
+        return [NSHomeDirectory() + "/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
@@ -129,13 +132,13 @@ enum CodexCLI {
     /// 失敗（turn.failed / error）・道具の実行・途中で終わった列は貼り付けない。
     static func parseEvents(_ data: Data) throws -> String {
         let lines = data.split(separator: 10).filter { !$0.allSatisfy { $0 == 13 || $0 == 32 || $0 == 9 } }
-        guard !lines.isEmpty else { throw Polisher.PolishError.badResponse }
+        guard !lines.isEmpty else { throw Polisher.rejected("Codex", "出力なし") }
         var message: String?
         var completed = 0
         var lastType = ""
         for line in lines {
             guard let event = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                  let type = event["type"] as? String else { throw Polisher.PolishError.badResponse }
+                  let type = event["type"] as? String else { throw Polisher.rejected("Codex", "JSONでない行 全\(lines.count)行") }
             lastType = type
             switch type {
             case "thread.started", "turn.started": continue
@@ -146,19 +149,19 @@ enum CodexCLI {
             case "error":
                 throw Polisher.PolishError.codexFailed(failureText(event["message"] as? String))
             case "item.started", "item.updated", "item.completed":
-                guard let item = event["item"] as? [String: Any], let itemType = item["type"] as? String else { throw Polisher.PolishError.badResponse }
+                guard let item = event["item"] as? [String: Any], let itemType = item["type"] as? String else { throw Polisher.rejected("Codex", "項目の形が不正 type=\(type)") }
                 switch itemType {
                 case "agent_message":
                     if type == "item.completed" { message = item["text"] as? String }
                 case "reasoning", "error": continue   // error 項目は警告（例: モデル情報が無い）。本文には使わない。
-                default: throw Polisher.PolishError.badResponse   // 道具（コマンド・ファイル変更・検索など）を使った応答は使わない。
+                default: throw Polisher.rejected("Codex", "想定外の項目 \(itemType)")   // 道具（コマンド・ファイル変更・検索など）を使った応答は使わない。
                 }
             default: continue
             }
         }
-        guard completed == 1, lastType == "turn.completed", let message else { throw Polisher.PolishError.badResponse }
+        guard completed == 1, lastType == "turn.completed", let message else { throw Polisher.rejected("Codex", "完了\(completed)回・最後のイベント=\(lastType)・本文\(message == nil ? "なし" : "あり")") }
         let trimmed = AIText.unwrapWholeCodeFence(message.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard !trimmed.isEmpty, trimmed.count < 32000 else { throw Polisher.PolishError.badResponse }
+        guard !trimmed.isEmpty, trimmed.count < 32000 else { throw Polisher.rejected("Codex", "本文\(trimmed.count)字") }
         return trimmed
     }
 

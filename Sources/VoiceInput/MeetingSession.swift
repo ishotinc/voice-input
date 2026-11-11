@@ -370,6 +370,8 @@ final class MeetingSession: @unchecked Sendable {
         let date = DateFormatter(); date.dateFormat = "yyyy-MM-dd"
         let url = try MeetingGoogleDrive.shared.export(title: r.displayTitle, body: String(contentsOf: bodyURL, encoding: .utf8), meetingID: r.id)
         r.documentURL = url.absoluteString; r.status = "saved"; r.error = nil; record = r; try r.save()
+        // 議事録をGoogleドキュメントに保存したら録音は消す（端末に音声を残さない）
+        Self.removeAudio(in: r.directory)
         DispatchQueue.main.async { self.latestURL = url }
     }
     func retry(_ r: MeetingRecord) {
@@ -389,6 +391,13 @@ final class MeetingSession: @unchecked Sendable {
                 if self.record?.endedAt == nil { self.record?.endedAt = r.startedAt.addingTimeInterval(self.chunks.map { $0.startSeconds + $0.durationSeconds }.max() ?? 0) }
                 self.enqueueFinish()
             } catch { self.end(error: error) }
+        }
+    }
+    static func removeAudio(in directory: URL) {
+        let fm = FileManager.default
+        try? fm.removeItem(at: directory.appendingPathComponent("audio"))
+        for f in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] where f.pathExtension.lowercased() == "wav" {
+            try? fm.removeItem(at: f)
         }
     }
     private func enqueueFinish() {

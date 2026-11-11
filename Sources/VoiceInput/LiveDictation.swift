@@ -99,7 +99,7 @@ final class EarlyPolisher {
         jobsLock.unlock()
         for plan in plans { _ = get(plan) }
     }
-    func finish(_ text: String, progress: (Int, Int) -> Void) throws -> String {
+    func finish(_ text: String, status: ((String) -> Void)? = nil, progress: (Int, Int) -> Void) throws -> String {
         let plans = Self.plans(text)
         let needed = Set(plans.map(\.key))
         jobsLock.lock()
@@ -111,12 +111,24 @@ final class EarlyPolisher {
         var reported = -1
         while true {
             let complete = chosen.filter { $0.group.wait(timeout: .now()) == .success }
-            for job in complete { if case .failure(let error) = job.result { throw error } }
+            // キャンセルだけは待たずに止める。ほかの失敗は全文の完了後に、失敗した文だけやり直す。
+            for job in complete { if case .failure(let error) = job.result, PolishRecovery.kind(of: error) == .cancelled { throw error } }
             if complete.count != reported { reported = complete.count; progress(reported, chosen.count) }
             if complete.count == chosen.count { break }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        return try chosen.map { try $0.result!.get() }.joined(separator: "\n")
+        var output: [String] = []
+        for (index, job) in chosen.enumerated() {
+            switch job.result! {
+            case .success(let value): output.append(value)
+            case .failure(let error):
+                let plan = plans[index], correct = correction
+                output.append(try PolishRecovery.run(after: error, cancelled: { job.isCancelled }, status: status) {
+                    try correct(plan.text, plan.neighbors, { job.isCancelled })
+                })
+            }
+        }
+        return output.joined(separator: "\n")
     }
     func cancel() { jobsLock.lock(); stopped = true; for job in jobs.values { job.cancel() }; jobsLock.unlock() }
 }
@@ -211,10 +223,11 @@ final class LiveDictation {
                     Log.write("途中認識を再利用 区間\(index)")
                 } else {
                     try self.writeAudio(samples, to: url)
-                    text = try Transcriber(whisperPath: whisper, modelPath: self.settings.resolvedModel,
-                        language: self.settings.language, initialPrompt: hint, fastMode: !self.settings.polishWithClaude, useMLX: self.settings.mlxForDictation).transcribe(url)
+                    // プロンプトのラベル語の漏れと、先頭・末尾に付いた決まり文句を外す（空なら下で捨てる）
+                    text = Hallucination.clean(try Transcriber(whisperPath: whisper, modelPath: self.settings.resolvedModel,
+                        language: self.settings.language, initialPrompt: hint, fastMode: !self.settings.polishWithClaude, useMLX: self.settings.mlxForDictation).transcribe(url))
                 }
-                guard !text.isEmpty, !Hallucination.isOnly(text) else { throw Polisher.PolishError.badResponse }
+                guard !text.isEmpty, !Hallucination.isOnly(text) else { throw Polisher.rejected("録音中の文字起こし", "文字なし・決まり文句のみ（AI補正の失敗ではない）") }
                 if self.isCancelled { return }
                 let draft: String
                 if provisional {
@@ -235,7 +248,7 @@ final class LiveDictation {
                             if !decision.needsClaude { return decision.text }
                             return try Polisher(model: settings.polishModel, effort: settings.polishEffort).polish(text,
                                 context: screen, client: client, aliases: aliases, instructions: settings.customPolishInstructions,
-                                neighboringSpeech: neighbors + "\n" + decision.advice, cancelled: cancelled)
+                                timeout: Polisher.dictationAttemptTimeout, neighboringSpeech: neighbors + "\n" + decision.advice, cancelled: cancelled)
                         }
                     }
                     self.early?.offer(self.formatter().format(draft).text)
@@ -254,7 +267,7 @@ final class LiveDictation {
             return rawParts.joined(separator: " ")
         }
     }
-    func polish(_ text: String, client: ClientContext?, progress: @escaping (Int, Int) -> Void) throws -> String {
+    func polish(_ text: String, client: ClientContext?, status: ((String) -> Void)? = nil, progress: @escaping (Int, Int) -> Void) throws -> String {
         // finish() has drained recognition before this call, so the cache is no longer being mutated.
         if early == nil {
             let settings = self.settings
@@ -266,11 +279,11 @@ final class LiveDictation {
                 if !decision.needsClaude { return decision.text }
                 return try Polisher(model: settings.polishModel, effort: settings.polishEffort).polish(text,
                     context: screen, client: client, aliases: aliases, instructions: settings.customPolishInstructions,
-                    neighboringSpeech: neighbors + "\n" + decision.advice, cancelled: cancelled)
+                    timeout: Polisher.dictationAttemptTimeout, neighboringSpeech: neighbors + "\n" + decision.advice, cancelled: cancelled)
             }
         }
         guard !isCancelled else { early?.cancel(); throw Polisher.PolishError.cancelled }
-        return try early!.finish(text, progress: progress)
+        return try early!.finish(text, status: status, progress: progress)
     }
     func cancel() {
         jev.cancel()

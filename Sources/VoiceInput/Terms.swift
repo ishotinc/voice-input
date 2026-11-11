@@ -60,6 +60,7 @@ struct TermDictionary: Codable {
             words.append(word)
             length += word.count + 1
         }
-        return "以下は日本語の作業指示です。固有名詞: \(words.joined(separator: "、"))。"
+        // ラベル語（「固有名詞:」など）は出力の先頭に漏れるので付けない。語の並びだけを渡す。
+        return words.isEmpty ? "以下は日本語の作業指示です。" : "以下は日本語の作業指示です。\(words.joined(separator: "、"))。"
     }
 }
