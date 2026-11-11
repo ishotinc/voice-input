@@ -35,6 +35,11 @@ enum SentencePolisherTests {
         } catch { check("空の補正結果を採用しない", true) }
         let payload = try? Polisher.userPayload(text: "今回の文", context: nil, neighboringSpeech: "前後の文")
         check("前後の文を発話対象と区別して渡す", payload?.contains("untrusted_neighboring_speech") == true)
+        let prompt = Polisher.systemPrompt
+        check("聞き間違い・助詞の誤り・意味の通らない語を直す規則がある", prompt.contains("聞き間違いを直す") && prompt.contains("助詞の誤り") && prompt.contains("意味が通らない語"))
+        check("制作/製作・補償/保証の例がある", prompt.contains("「制作」") && prompt.contains("「補償」") && prompt.contains("「保証」"))
+        check("数字・日時・否定・固有名詞は変えない規則を保つ", prompt.contains("数字とその順番・日時・金額・否定") && prompt.contains("固有名詞・ファイル名・コマンドは一字も変えない") && prompt.contains("推測で漢字や英字に置き換えない"))
+        check("迷ったら元のまま・意味の通る文は変えない", prompt.contains("元の表記を保つ") && prompt.contains("意味の通る表現なら変えない"))
         return passed
     }
 }
