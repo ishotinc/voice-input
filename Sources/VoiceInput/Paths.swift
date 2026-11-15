@@ -8,6 +8,8 @@ enum Paths {
     static var models: URL { root.appendingPathComponent("models", isDirectory: true) }
     static var tmp: URL { root.appendingPathComponent("tmp", isDirectory: true) }
     static var terms: URL { root.appendingPathComponent("terms.json") }
+    /// AI補正が直した語の組（自動で足した語）。手書きの terms.json とは分けて持つ。
+    static var learnedTerms: URL { root.appendingPathComponent("learned-terms.json") }
     static var settings: URL { root.appendingPathComponent("settings.json") }
     static var log: URL { root.appendingPathComponent("voice-input.log") }
 

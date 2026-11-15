@@ -48,7 +48,11 @@ mkdir -p "$APP/Contents/Resources"
 cp -R Resources/. "$APP/Contents/Resources/"
 
 echo "==> 署名"
-if [ -n "$IDENTITY" ]; then
+if [ "$IDENTITY" = "-" ]; then
+  echo "    VOICEINPUT_IDENTITY=- の指定なのでアドホック署名にします"
+  echo "       ビルドのたびに権限が外れます"
+  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "$APP"
+elif [ -n "$IDENTITY" ]; then
   echo "    証明書で署名します（権限がビルドをまたいで残ります）"
   codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "$APP"
 else
@@ -80,14 +84,28 @@ else
 fi
 
 if echo "$PERM" | grep -qE "マイク=×|アクセシビリティ=×"; then
-  cat <<'WARN'
+  if [ -z "$IDENTITY" ] || [ "$IDENTITY" = "-" ]; then
+    cat <<'WARN'
 
   ⚠️ 必須の権限が外れています。
 
-  このアプリはアドホック署名（codesign -s -）なので、ビルドし直すたびに署名が変わり、
+  今回のビルドはアドホック署名（codesign -s -）なので、ビルドし直すたびに署名が変わり、
   macOS は「別のアプリ」とみなして許可を捨てます。実測で確認済み（2026-09-04）。
 
   ビルド後は毎回、メニューバーのアイコン →「設定…」→「一般」→「権限を確認…」から入れ直してください。
+WARN
+  else
+    cat <<'WARN'
+
+  ⚠️ 必須の権限が外れています。
+
+  今回のビルドは証明書で署名したので、ビルドし直しても許可は外れません。
+  常駐中のアプリの許可が外れています。
+
+  メニューバーのアイコン →「設定…」→「一般」→「権限を確認…」から入れ直してください。
+WARN
+  fi
+  cat <<'WARN'
   古い許可が残って外せないときは:
       tccutil reset Microphone com.ishot.voice-input
       tccutil reset Accessibility com.ishot.voice-input

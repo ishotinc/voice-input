@@ -17,6 +17,9 @@ struct SettingsSnapshot {
     var meetingStatus: String
     var googleTitle: String
     var googleEnabled: Bool
+    var learnTerms: Bool = true
+    var syncTextReplacements: Bool = true
+    var learnedTitle: String = "自動で足した語…"
 }
 
 /// 設定ウィンドウから頼む操作。中身は AppDelegate の既存の処理を呼ぶ。
@@ -25,6 +28,7 @@ enum SettingsCommand {
     case selectProvider(AIProvider), reconnectAI, setClaudeKey, setOpenAIKey, showJev
     case chooseClientFolder, clearClientFolder
     case connectGoogle, openMeetingData
+    case toggleLearnTerms, showLearnedTerms, toggleTextReplacements
 }
 
 /// メニューバーのアプリには「ファイル」メニューが無いので、⌘W をここで受ける。
@@ -124,6 +128,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [caption(""), value(\.contextStatus)],
             [caption("文体"), button("仕上げの文体を設定…", .editStyle, enabled: \.idle)],
             [caption("言葉"), row(button("用語辞書を開く", .openTerms), button("人名の読みを登録…", .registerName, enabled: { $0.idle && $0.hasClientFolder }))],
+            [caption("自動の語"), row(checkbox("AIが直した語を辞書に足す", .toggleLearnTerms, on: \.learnTerms, enabled: \.idle),
+                                     button(titled: \.learnedTitle, .showLearnedTerms))],
+            [caption("ユーザ辞書"), checkbox("英字の語を Mac のユーザ辞書へ写す（週1回・システム設定を自動で操作）", .toggleTextReplacements, on: \.syncTextReplacements, enabled: \.idle)],
             [caption("権限"), button("権限を確認…", .showPermissions)],
             [caption("アプリ"), row(button("Finder で表示", .revealApp), button("ログを開く", .openLog))],
         ]

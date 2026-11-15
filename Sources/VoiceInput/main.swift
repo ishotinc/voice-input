@@ -277,6 +277,8 @@ if args.contains("--meeting-selftest") { exit(MeetingTests.run() ? 0 : 1) }
 if args.contains("--sentence-test") { exit(SentencePolisherTests.run() ? 0 : 1) }
 
 if args.contains("--auth-test") { exit(PolisherTests.run() ? 0 : 1) }
+if args.contains("--learned-terms-test") { exit(LearnedTermsTests.run() ? 0 : 1) }
+if args.contains("--text-replacement-test") { exit(TextReplacementTests.run() ? 0 : 1) }
 if args.contains("--polish-recovery-test") { exit(PolishRecoveryTests.run() ? 0 : 1) }
 if args.contains("--ai-link-test") { exit(AILinkTests.run() ? 0 : 1) }
 // 連携切れのアイコンを白地と黒地で確かめる（PNG へ書き出すだけ）。

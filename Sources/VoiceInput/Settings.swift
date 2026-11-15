@@ -44,6 +44,11 @@ struct Settings: Codable {
     /// User's formatting preferences, subordinate to preserving the spoken content.
     var customPolishInstructions: String = ""
 
+    /// AI補正が直した語を数えて、用語辞書に自動で足すか。保存するのは語の組と回数だけ。
+    var learnTerms: Bool = true
+    /// Mac のユーザ辞書へ英字の語を写すか。
+    var syncTextReplacements: Bool = true
+
     var selectedClientFolder: String = ""
     var clientNameAliases: [String: [String: String]] = [:]
 
@@ -73,6 +78,8 @@ struct Settings: Codable {
         openAIEffort = try c.decodeIfPresent(String.self, forKey: .openAIEffort) ?? d.openAIEffort
         useScreenContext = try c.decodeIfPresent(Bool.self, forKey: .useScreenContext) ?? d.useScreenContext
         shareScreenContextWithClaude = try c.decodeIfPresent(Bool.self, forKey: .shareScreenContextWithClaude) ?? d.shareScreenContextWithClaude
+        learnTerms = try c.decodeIfPresent(Bool.self, forKey: .learnTerms) ?? d.learnTerms
+        syncTextReplacements = try c.decodeIfPresent(Bool.self, forKey: .syncTextReplacements) ?? d.syncTextReplacements
         selectedClientFolder = try c.decodeIfPresent(String.self, forKey: .selectedClientFolder) ?? d.selectedClientFolder
         clientNameAliases = try c.decodeIfPresent([String: [String: String]].self, forKey: .clientNameAliases) ?? d.clientNameAliases
         customPolishInstructions = try c.decodeIfPresent(String.self, forKey: .customPolishInstructions) ?? d.customPolishInstructions

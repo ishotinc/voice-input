@@ -51,6 +51,16 @@ struct TermDictionary: Codable {
         }
     }
 
+    /// 録音に使う辞書。手書きの terms.json に、learned-terms.json の「登録済み」を合わせる。
+    /// 手書きの辞書は書き換えない。自動の語は手書きの誤り表記とぶつからないものだけを後ろに足す。
+    static func loadForDictation(manual url: URL = Paths.terms, learned: LearnedTermsFile? = nil) -> (merged: TermDictionary, manual: TermDictionary, learned: LearnedTermsFile) {
+        let manual = load(from: url)
+        let learnedFile = learned ?? LearnedTermsStore.shared.load()
+        var merged = manual
+        merged.entries += LearnedTerms.entries(from: learnedFile, manual: manual)
+        return (merged, manual, learnedFile)
+    }
+
     /// whisper に渡す初期プロンプト。正しい表記を先に見せておくと誤変換が減る。
     /// 辞書が増えても長くしない。長すぎるプロンプトは効きが落ち、出力が揺れる。
     var initialPrompt: String {

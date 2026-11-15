@@ -148,7 +148,8 @@ final class LiveDictation {
     private let initialContext: ScreenContext?
     private let screenPreparation: ScreenPreparation?
     private var context: ScreenContext? { screenPreparation?.wait() ?? initialContext }
-    private let terms = TermDictionary.load()
+    private let dictionary = TermDictionary.loadForDictation()
+    private var terms: TermDictionary { dictionary.merged }
     private let jev = IncrementalCorrection()
     private let allowsAI: Bool
     private let earlyLock = NSLock()
@@ -213,8 +214,8 @@ final class LiveDictation {
             do {
                 let client = self.preparation?.wait()
                 let aliases = self.settings.clientNameAliases[self.settings.selectedClientFolder] ?? [:]
-                let hint = client?.initialPrompt(dictionary: self.terms.initialPrompt, screen: self.context, aliases: aliases)
-                    ?? self.context?.initialPrompt(dictionary: self.terms.initialPrompt) ?? self.terms.initialPrompt
+                let hint = HintPrompt.make(terms: self.dictionary.manual, learned: self.dictionary.learned,
+                                           screen: self.context, client: client, aliases: aliases)
                 guard let whisper = self.settings.resolvedWhisper else { throw Transcriber.TranscribeError.whisperMissing }
                 let text: String
                 if !provisional, let preview = self.preview, preview.index == index,

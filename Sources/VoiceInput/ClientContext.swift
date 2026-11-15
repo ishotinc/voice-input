@@ -26,11 +26,10 @@ struct ClientContext {
         }
     }
 
-    func initialPrompt(dictionary: String, screen: ScreenContext?, aliases: [String: String] = [:]) -> String {
-        let names = validatedAliases(aliases).values.sorted()
-        let hints = (names + vocabulary + (screen?.vocabulary ?? [])).joined(separator: "、")
-        // ラベル語（「参考表記:」）は出力に漏れるので付けない
-        return String(dictionary.prefix(200)) + (hints.isEmpty ? "" : "\n" + String(hints.prefix(150)))
+    /// Whisper のヒント。画面の語 → 最近よく直された語 → 顧客資料の語 → 既存辞書の順（HintPrompt）。
+    func initialPrompt(terms: TermDictionary, screen: ScreenContext?, aliases: [String: String] = [:], learned: [String] = []) -> String {
+        HintPrompt.build(screen: screen?.vocabulary ?? [], learned: learned,
+                         client: validatedAliases(aliases).values.sorted() + vocabulary, dictionary: terms.entries.map(\.correct))
     }
 
     static func load(folderPath: String, maxFiles: Int = 10, maxCharacters: Int = 12000, maxBytes: Int = 200000, perFileBytes: Int = 32000, timeBudget: TimeInterval = 0.6) -> ClientContext {

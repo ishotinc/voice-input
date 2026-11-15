@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let meeting = MeetingController()
     private var meetingStartPanel: NSPanel?
     private var meetWatchTimer: Timer?
+    private let textReplacementRunner = TextReplacementRunner()
+    private var textReplacementTimer: Timer?
+    private var textReplacementIssue: String?
     private var automaticMeetingCode: String?
     private var meetingContinuity = MeetingContinuity()
     private var suppressedMeetingCode: String?
@@ -160,10 +163,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateStatusIcon()
         if let menuPreview { startMenuPreview(menuPreview); return }
         if recoveryResolvedThrough == nil { markRecordingsResolved(through: Date()) }
+        textReplacementIssue = settings.syncTextReplacements ? TextReplacementSync.loadState().lastError : nil
+        textReplacementRunner.onIssue = { [weak self] issue in
+            guard let self else { return }
+            self.textReplacementIssue = self.settings.syncTextReplacements ? issue : nil
+            self.updateStatusIcon()
+        }
+        // 5分以上のアイドル状態を取りこぼさないよう、1分ごとに確認する。
+        textReplacementTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.settings.syncTextReplacements else { return }
+            self.textReplacementRunner.tick(busy: self.textReplacementBusyCheck)
+        }
+        updateStatusIcon()
         restorePendingPolishes()
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(showJevSettings), name: Notification.Name("com.ishot.voice-input.show-jev"), object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(receiveSharedScreen(_:)), name: Notification.Name("com.ishot.voice-input.shared-screen"), object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(diagnoseScreenContext), name: Notification.Name("com.ishot.voice-input.context-diagnostic"), object: nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(testTextReplacements), name: Notification.Name("com.ishot.voice-input.text-replacement-selftest"), object: nil)
         MeetingTranscriptOutbox.shared.start()
         prepareSelectedDictionary()
         ResidentTranscriber.warm(modelPath: settings.resolvedModel, useMLX: settings.mlxForDictation)
@@ -213,6 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        textReplacementTimer?.invalidate()
         recorder.discard()
         liveDictation?.cancel()
         // 未完了の録音は終了時に削除しない。変換完了時だけ片付ける。
@@ -247,10 +265,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 button.toolTip = AILinkIcon.description + "。クリックしてログインしてください。"
                 return
             }
-            let warning = lastError ?? (settings.polishWithClaude ? linkMonitor.status.blockedMessage : nil)
+            let recordingWarning = lastError ?? (settings.polishWithClaude ? linkMonitor.status.blockedMessage : nil)
+            let warning = recordingWarning ?? textReplacementIssue
             button.image = symbol(warning == nil ? "mic" : "exclamationmark.circle", warning ?? "待機中")
             button.contentTintColor = warning == nil ? nil : .systemOrange
-            button.toolTip = warning.map { "録音は停止しています。\n" + $0 } ?? "音声入力・待機中"
+            button.toolTip = recordingWarning.map { "録音は停止しています。\n" + $0 } ?? textReplacementIssue ?? "音声入力・待機中"
         case .recording:
             button.contentTintColor = .systemRed
             button.title = linkFix == nil ? "" : "!"
@@ -308,7 +327,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             clientStatus: clientStatus,
             meetingStatus: meeting.status,
             googleTitle: MeetingGoogleDrive.shared.isAuthenticated ? "Google連携を変更…" : "Googleドライブを連携…",
-            googleEnabled: !meeting.isBusy && state == .idle)
+            googleEnabled: !meeting.isBusy && state == .idle,
+            learnTerms: settings.learnTerms,
+            syncTextReplacements: settings.syncTextReplacements,
+            learnedTitle: "自動で足した語（\(LearnedTermsStore.shared.registered.count)件）…")
     }
 
     private func performSettings(_ command: SettingsCommand) {
@@ -330,7 +352,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .clearClientFolder: clearClientFolder()
         case .connectGoogle: connectMeetingGoogle()
         case .openMeetingData: openMeetingData()
+        case .toggleLearnTerms: settings.learnTerms.toggle(); settings.save()
+        case .showLearnedTerms: showLearnedTerms()
+        case .toggleTextReplacements:
+            settings.syncTextReplacements.toggle(); settings.save()
+            if !settings.syncTextReplacements { textReplacementIssue = nil }
+            updateStatusIcon()
         }
+    }
+
+    private var learnedWindow: LearnedTermsWindowController?
+    private func showLearnedTerms() {
+        if learnedWindow == nil { learnedWindow = LearnedTermsWindowController() }
+        learnedWindow?.show()
     }
 
     private var jevWindow: JevSettingsWindow?
@@ -422,8 +456,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let text = requirement.errorDescription ?? ""
             return ("⚠️ " + Self.shortLine(text), nil, text)
         }
+        if let issue = textReplacementIssue { return ("⚠️ " + Self.shortLine(issue), #selector(retryTextReplacements), issue + "\n（クリックでもう一度試す）") }
         if !lastWarnings.isEmpty { return ("⚠️ 禁止語: " + lastWarnings.joined(separator: "・"), nil, nil) }
         return nil
+    }
+
+    /// ワーカーからも呼ぶので、録音・会議の状態は必ずメインスレッドで読む。
+    private var textReplacementBusyCheck: () -> Bool {
+        { [weak self] in
+            let read = { [weak self] in
+                guard let self else { return true }
+                return !self.settings.syncTextReplacements || self.state != .idle || self.meeting.isBusy || self.meeting.state == .recording
+            }
+            return Thread.isMainThread ? read() : DispatchQueue.main.sync(execute: read)
+        }
+    }
+
+    @objc private func retryTextReplacements() {
+        guard settings.syncTextReplacements else { return }
+        textReplacementRunner.tick(busy: textReplacementBusyCheck, force: true)
+    }
+
+    @objc private func testTextReplacements() {
+        guard settings.syncTextReplacements else { return }
+        textReplacementRunner.liveTest(busy: textReplacementBusyCheck)
     }
 
     /// 長い知らせの最初の1文だけをメニューに出す。全文はツールチップとコピーで見られる。
@@ -942,11 +998,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             DispatchQueue.main.async { self.clientStatus = client?.status ?? "顧客資料: 未選択" }
-            let terms = TermDictionary.load()
+            let dictionary = TermDictionary.loadForDictation()
+            let terms = dictionary.merged
             let transcriber = Transcriber(whisperPath: whisper,
                                           modelPath: settings.resolvedModel,
                                           language: settings.language,
-                                          initialPrompt: client?.initialPrompt(dictionary: terms.initialPrompt, screen: context, aliases: aliases) ?? context?.initialPrompt(dictionary: terms.initialPrompt) ?? terms.initialPrompt,
+                                          initialPrompt: HintPrompt.make(terms: dictionary.manual, learned: dictionary.learned,
+                                                                         screen: context, client: client, aliases: aliases),
                                           fastMode: !settings.polishWithClaude, useMLX: settings.mlxForDictation)
             let whisperText: String
             do {
@@ -1005,7 +1063,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     else {
                         polished = try polishJob.run(status: status, progress: progress)
                     }
-                    if !polished.isEmpty { result.text = polished }
+                    if !polished.isEmpty {
+                        // 置き換わった語の組だけを数える（文章は保存しない）。画面は録音開始時のもの。
+                        if settings.learnTerms {
+                            LearnedTermsStore.shared.record(before: draft, after: polished, raw: raw, screen: context,
+                                                            client: client, manual: dictionary.manual)
+                        }
+                        result.text = polished
+                    }
                     let via = settings.aiProvider.shortName
                     let detail: String
                     switch settings.aiProvider {
@@ -1359,10 +1424,12 @@ extension AppDelegate {
                 self.finish(nil, warning: "顧客辞書を準備できませんでした。資料を確認してください。未補正文は貼り付けません。", target: target, job: job)
                 return
             }
-            let terms = TermDictionary.load()
+            let dictionary = TermDictionary.loadForDictation()
+            let terms = dictionary.merged
             let aliases = settings.clientNameAliases[settings.selectedClientFolder] ?? [:]
             let transcriber = Transcriber(whisperPath: whisper, modelPath: settings.resolvedModel, language: settings.language,
-                                          initialPrompt: client?.initialPrompt(dictionary: terms.initialPrompt, screen: nil, aliases: aliases) ?? terms.initialPrompt,
+                                          initialPrompt: HintPrompt.make(terms: dictionary.manual, learned: dictionary.learned,
+                                                                         screen: nil, client: client, aliases: aliases),
                                           fastMode: !settings.polishWithClaude, useMLX: settings.mlxForDictation)
             let raw: String
             do { raw = Hallucination.clean(try transcriber.transcribe(recovery.url)) }
