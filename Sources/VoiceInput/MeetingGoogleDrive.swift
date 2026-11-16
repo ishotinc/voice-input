@@ -14,7 +14,13 @@ struct GoogleMeetingEntry {
 /// Call network methods off the main thread. OAuth credentials live only in Keychain.
 final class MeetingGoogleDrive {
     static let shared = MeetingGoogleDrive()
-    struct Failure: LocalizedError { let message: String; var status: Int? = nil; var errorDescription: String? { message } }
+    enum FailureKind: Equatable { case needsReconnect, other }
+    struct Failure: LocalizedError {
+        let message: String
+        var status: Int? = nil
+        var kind: FailureKind = .other
+        var errorDescription: String? { message }
+    }
     private struct Client: Codable { let client_id: String; let client_secret: String? }
     private struct Credentials: Codable { var client: Client; var refreshToken: String; var accountID: String }
     private struct StreamState: Codable { var key: String; var hash: String; var pendingHash: String? }
@@ -159,15 +165,15 @@ final class MeetingGoogleDrive {
                 }
             }
             guard opened.wait(timeout: .now() + 20) == .success else {
-                throw Failure(message: "Google認証画面を開けませんでした。Chromeを起動して、もう一度Google連携を押してください。")
+                throw Failure(message: "Google認証画面を開けませんでした。Chromeを起動して、もう一度Google連携を押してください。", kind: .needsReconnect)
             }
             resultLock.lock(); let launched = didOpen; resultLock.unlock()
-            guard launched else { throw Failure(message: "Google認証用のブラウザーを開けませんでした。Chromeを起動して再接続してください。") }
+            guard launched else { throw Failure(message: "Google認証用のブラウザーを開けませんでした。Chromeを起動して再接続してください。", kind: .needsReconnect) }
             let code = try listener.code(state:nonce)
             let result = try token(["client_id":client.client_id,"client_secret":client.client_secret ?? "","code":code,"code_verifier":verifier,"redirect_uri":redirect,"grant_type":"authorization_code"])
-            guard let refresh = result["refresh_token"] as? String else { throw Failure(message:"Googleから継続接続の許可を取得できませんでした。再接続してください。") }
+            guard let refresh = result["refresh_token"] as? String else { throw Failure(message:"Googleから継続接続の許可を取得できませんでした。再接続してください。", kind: .needsReconnect) }
             lock.lock(); defer { lock.unlock() }
-            guard let accessToken = result["access_token"] as? String else { throw Failure(message:"Google認証の応答に問題があります。") }
+            guard let accessToken = result["access_token"] as? String else { throw Failure(message:"Google認証の応答に問題があります。", kind: .needsReconnect) }
             access = (accessToken,Date().addingTimeInterval(result["expires_in"] as? Double ?? 3600))
             // Account changes must never reuse another account's folder/document IDs.
             let about = try api("https://www.googleapis.com/drive/v3/about", query:["fields":"user(permissionId)"])
@@ -195,9 +201,9 @@ final class MeetingGoogleDrive {
     }
     private func bearer() throws -> String {
         if let a = access, a.1.timeIntervalSinceNow > 60 { return a.0 }
-        guard let c = credentials() else { throw Failure(message:"メニューからGoogleドライブに接続してください。") }
+        guard let c = credentials() else { throw Failure(message:"メニューからGoogleドライブに接続してください。", kind: .needsReconnect) }
         let value = try token(["client_id":c.client.client_id,"client_secret":c.client.client_secret ?? "","refresh_token":c.refreshToken,"grant_type":"refresh_token"])
-        guard let text = value["access_token"] as? String else { throw Failure(message:"Googleに再接続してください。") }
+        guard let text = value["access_token"] as? String else { throw Failure(message:"Googleに再接続してください。", kind: .needsReconnect) }
         access = (text,Date().addingTimeInterval(value["expires_in"] as? Double ?? 3600)); return text
     }
     private func send(_ input:URLRequest) throws -> [String:Any] {
@@ -216,7 +222,7 @@ final class MeetingGoogleDrive {
             let endpoint = request.url?.path ?? "unknown"
             Log.write("Google API失敗 HTTP=\(http.statusCode) endpoint=\(endpoint)")
             if endpoint == "/token", http.statusCode == 400 {
-                throw Failure(message:"Googleの認証更新に失敗しました。VoiceInputのメニューからGoogleドライブへ再接続してください。録音と文字起こしはMacに保持しています。", status: http.statusCode)
+                throw Failure(message:"Googleの認証更新に失敗しました。VoiceInputのメニューからGoogleドライブへ再接続してください。録音と文字起こしはMacに保持しています。", status: http.statusCode, kind: .needsReconnect)
             }
             throw Failure(message:"Google接続エラー（HTTP \(http.statusCode)）。APIの有効化・アカウントの権限・接続設定を確認してください。",status:http.statusCode)
         }
@@ -254,7 +260,7 @@ final class MeetingGoogleDrive {
     }
     func export(title:String, body:String, meetingID:String) throws -> URL {
         lock.lock(); defer { lock.unlock() }
-        guard let c = credentials(), state.accountID == c.accountID else { throw Failure(message:"Googleドライブに再接続して保存先を確認してください。") }
+        guard let c = credentials(), state.accountID == c.accountID else { throw Failure(message:"Googleドライブに再接続して保存先を確認してください。", kind: .needsReconnect) }
         guard !meetingID.isEmpty else { throw Failure(message:"会議IDがありません。") }
         if let id = state.documents[meetingID] { try verifyDocument(id:id, body:body); return documentURL(id) }
         if let id = state.pendingDocuments?[meetingID] { return try completeDocument(id:id,body:body,meetingID:meetingID) }
@@ -474,7 +480,7 @@ final class MeetingGoogleDrive {
                 _=response.withCString { Darwin.send(client,$0,strlen($0),0) }
                 guard let code=values["code"],!code.isEmpty else { throw Failure(message:"Googleへの接続が許可されませんでした。") }; return code
             }
-            throw Failure(message:"Google接続の待ち時間が終了しました。メニューから再接続できます。")
+            throw Failure(message:"Google接続の待ち時間が終了しました。メニューから再接続できます。", kind: .needsReconnect)
         }
     }
 }

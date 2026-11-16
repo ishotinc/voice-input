@@ -81,6 +81,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 録音中にログインが済んだら、録音が終わってから文章の補正を勧める。
     private var offerPendingWhenIdle = false
     private var linkNoticeShown = false
+    private var pendingKeySettingsProvider: AIProvider?
+    /// テストで状態遷移を通すための境界差し替え。通常実行では未設定。
+    private var keySettingsStatusOverride: AILinkStatus?
+    private var keySettingsOpenerForCheck: ((AIProvider) -> Void)?
+    private var pendingKeyNoticeForCheck: (() -> Void)?
+    private var enqueueKeySettingsOpen: (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }
     private var loginPanelOpen = false
     /// 失敗中のメニューの確認起動だけ true。
     private var ignoreRecoveryResolution = false
@@ -93,7 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var state: State = .idle {
         didSet {
             updateStatusIcon()
-            if state == .idle, offerPendingWhenIdle { offerPendingAfterLogin() }
+            if state == .idle {
+                schedulePendingKeySettingsIfNeeded()
+                if offerPendingWhenIdle { offerPendingAfterLogin() }
+            }
         }
     }
     private var history: [String] = []          // 直近5件。メモリだけ。ディスクに残さない
@@ -110,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var blinkOn = false
     private var hotKeyRegistered = false
     private var lastError: String?
+    private var lastErrorGoogleFailureKind: MeetingGoogleDrive.FailureKind?
     /// メニューから開始したときの貼り付け先。ホットキー起動では使わない。
     private var pendingTargetOverride: NSRunningApplication?
     /// 権限画面は1起動につき1回だけ自動で出す。毎回出すと邪魔になる。
@@ -146,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         meeting.onRecordingFailure = { [weak self] message in
             guard let self else { return }
-            self.lastError = message
+            self.setLastError(message)
             self.suppressedMeetingCode = self.automaticMeetingCode
             self.automaticMeetingCode = nil
         }
@@ -154,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         meeting.onChange = { [weak self] in
             guard let self else { return }
             if !self.meeting.isBusy && self.meeting.status.hasPrefix("要確認:") {
-                self.lastError = self.meeting.status
+                self.setLastError(self.meeting.status, googleFailureKind: self.meeting.statusFailureKind)
                 Log.write(self.meeting.status)
             }
             self.updateStatusIcon()
@@ -209,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         historyShortcut.start()
         hotKeyRegistered = hotKey.register { [weak self] in self?.toggleRecording() }
         if !hotKeyRegistered {
-            lastError = "⌥Space を登録できませんでした。他のアプリが同じキーを使っています。"
+            setLastError("⌥Space を登録できませんでした。他のアプリが同じキーを使っています。")
         }
 
         Permissions.requestMicrophone { granted in
@@ -381,15 +391,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 知らせる必要があるときだけ、最上部に出す
         var hasContext = false
         if let fix = linkFix {
-            var enabled = state == .idle
-            if case .login = fix { enabled = true }
-            let login = plainItem("AIにログイン…", #selector(loginToAI), enabled: enabled)
-            login.toolTip = Self.linkDescription(fix)
+            let presentation = Self.linkFixPresentation(fix, pendingKeySettings: pendingKeySettingsProvider != nil)
+            let login = plainItem(presentation.title, presentation.action, enabled: true)
+            login.toolTip = presentation.tooltip
             menu.addItem(login)
             hasContext = true
         }
         if let line = headline {
-            let item = plainItem(line.title, line.action, enabled: line.action != nil)
+            let item = plainItem(line.title, line.action, enabled: line.enabled)
             item.toolTip = line.detail
             menu.addItem(item)
             hasContext = true
@@ -438,27 +447,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    private func setLastError(_ message: String?, googleFailureKind: MeetingGoogleDrive.FailureKind? = nil) {
+        lastError = message
+        lastErrorGoogleFailureKind = googleFailureKind
+    }
+
     /// 最上部に出す1行。普段（待機中で問題なし）は nil。
-    private var headline: (title: String, action: Selector?, detail: String?)? {
-        if meeting.blocksRecording { return (Self.shortLine(meeting.status), nil, meeting.status) }
+    private var headline: (title: String, action: Selector?, detail: String?, enabled: Bool)? {
+        if meeting.blocksRecording {
+            return Self.meetingStatusHeadline(meeting.status, failureKind: meeting.statusFailureKind, busyReason: "録音・会議の処理中は再連携できません")
+        }
         switch state {
-        case .recording: return ("録音中", nil, nil)
-        case .processing: return ("変換中", nil, nil)
+        case .recording:
+            return ("録音中", nil, lastErrorGoogleFailureKind == .needsReconnect ? "録音中は再連携できません" : nil, false)
+        case .processing:
+            return ("変換中", nil, lastErrorGoogleFailureKind == .needsReconnect ? "変換中は再連携できません" : nil, false)
         case .idle: break
         }
-        if meeting.processingCount > 0 { return (Self.shortLine(meeting.status), nil, meeting.status) }
-        if settings.polishWithClaude, let blocked = linkMonitor.status.blockedMessage { return ("⚠️ " + Self.shortLine(blocked), nil, blocked) }
-        if let lastError { return ("⚠️ " + Self.shortLine(lastError), #selector(copyLastError), lastError + "\n（クリックでコピー）") }
+        if meeting.processingCount > 0 {
+            return Self.meetingStatusHeadline(meeting.status, failureKind: meeting.statusFailureKind, busyReason: "会議データの処理中は再連携できません")
+        }
+        if let error = lastError, let action = Self.reconnectAction(for: lastErrorGoogleFailureKind) {
+            let canReconnect = Self.canReconnectGoogle(state: state, meetingBusy: meeting.isBusy)
+            return ("⚠️ " + Self.shortLine(error), action,
+                    canReconnect ? "クリックで再連携の画面を開きます" : "録音・会議の処理中は再連携できません", canReconnect)
+        }
+        if settings.polishWithClaude, let blocked = linkMonitor.status.blockedMessage {
+            return ("⚠️ " + Self.shortLine(blocked), Self.aiReconnectAction(for: linkMonitor.status), blocked + "\n（クリックでAI設定を開きます）", true)
+        }
+        if let lastError {
+            return ("⚠️ " + Self.shortLine(lastError), #selector(copyLastError), lastError + "\n（クリックでコピー）", true)
+        }
         let missing = Permissions.missingRequired
-        if !missing.isEmpty { return ("⚠️ 権限が足りません: " + missing.map(\.title).joined(separator: "・"), #selector(showPermissions(_:)), nil) }
-        if !hotKeyRegistered { return ("⚠️ ⌥Space を登録できていません", nil, nil) }
+        if !missing.isEmpty { return ("⚠️ 権限が足りません: " + missing.map(\.title).joined(separator: "・"), #selector(showPermissions(_:)), nil, true) }
+        if !hotKeyRegistered { return ("⚠️ ⌥Space を登録できていません", nil, nil, false) }
         if settings.polishWithClaude, let requirement = Polisher.missingRequirement(settings.aiProvider) {
             let text = requirement.errorDescription ?? ""
-            return ("⚠️ " + Self.shortLine(text), nil, text)
+            let action = Self.missingRequirementAction(requirement)
+            return ("⚠️ " + Self.shortLine(text), action, text + "\n（クリックでAI設定を開きます）", true)
         }
-        if let issue = textReplacementIssue { return ("⚠️ " + Self.shortLine(issue), #selector(retryTextReplacements), issue + "\n（クリックでもう一度試す）") }
-        if !lastWarnings.isEmpty { return ("⚠️ 禁止語: " + lastWarnings.joined(separator: "・"), nil, nil) }
+        if let issue = textReplacementIssue { return ("⚠️ " + Self.shortLine(issue), #selector(retryTextReplacements), issue + "\n（クリックでもう一度試す）", true) }
+        if !lastWarnings.isEmpty { return ("⚠️ 禁止語: " + lastWarnings.joined(separator: "・"), nil, nil, false) }
         return nil
+    }
+
+    /// Googleエラーの型情報から、再接続画面を開くか決める。
+    static func reconnectAction(for failureKind: MeetingGoogleDrive.FailureKind?) -> Selector? {
+        guard failureKind == .needsReconnect else { return nil }
+        return #selector(connectMeetingGoogle)
+    }
+
+    private static func meetingStatusHeadline(_ message: String, failureKind: MeetingGoogleDrive.FailureKind?, busyReason: String) -> (title: String, action: Selector?, detail: String?, enabled: Bool) {
+        let reconnectBlocked = failureKind == .needsReconnect
+        return (Self.shortLine(message), nil, reconnectBlocked ? busyReason : message, false)
+    }
+
+    private static func canReconnectGoogle(state: State, meetingBusy: Bool) -> Bool {
+        state == .idle && !meetingBusy
+    }
+
+    private static func aiReconnectAction(for status: AILinkStatus) -> Selector {
+        switch status {
+        case .down(.login): return #selector(loginToAI)
+        case .down(.key(let keyProvider)):
+            return keyProvider == .openAIAPI ? #selector(showOpenAIKeySettings) : #selector(showAPIKeySettings)
+        case .blocked, .unknown, .connected:
+            return #selector(showPreferences)
+        }
+    }
+
+    private static func missingRequirementAction(_ requirement: Polisher.PolishError) -> Selector {
+        switch requirement {
+        case .openAIKeyMissing: return #selector(showOpenAIKeySettings)
+        case .cliMissing, .codexMissing: return #selector(showPreferences)
+        default: return #selector(showPreferences)
+        }
     }
 
     /// ワーカーからも呼ぶので、録音・会議の状態は必ずメインスレッドで読む。
@@ -558,7 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Let menu tracking finish before restoring the input application's focus.
         DispatchQueue.main.async {
             Inserter.insert(text, into: target) { [weak self] error in
-                if let error { self?.lastError = error.localizedDescription }
+                if let error { self?.setLastError(error.localizedDescription) }
                 Log.write(error == nil ? "履歴から貼り付けを実行" : "履歴はクリップボードへ保存（自動貼り付け不可）")
             }
         }
@@ -581,6 +644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func selectInputMode(_ sender: NSMenuItem) {
         guard state == .idle else { return }
         settings.polishWithClaude = sender.tag == 1
+        if !settings.polishWithClaude { pendingKeySettingsProvider = nil }
         settings.save()
         linkMonitor.checkNow()
         polishStatus = settings.polishWithClaude ? "通常モード: AI補正が終わるまで待つ" : "高速入力モード: Mac内で変換"
@@ -845,7 +909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         aiPanel.close()
         recordingContext = nil
         recordingClient = nil
-        lastError = nil
+        setLastError(nil)
         lastWarnings = []
 
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
@@ -887,7 +951,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.liveDictation?.cancel(); self.liveDictation = nil
             self.recorder.onSamples = nil
             self.recordingContext = nil
-            self.lastError = message; self.state = .idle; self.restoreDictationState()
+            self.setLastError(message); self.state = .idle; self.restoreDictationState()
             Log.write(message)
         }
         do {
@@ -902,7 +966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             recordingContext = nil
             recordingClient = nil
-            lastError = error.localizedDescription
+            setLastError(error.localizedDescription)
             recorder.discard()
             liveDictation?.cancel(); liveDictation = nil; recorder.onSamples = nil
             Log.write("録音を開始できない: \(error.localizedDescription)")
@@ -1121,7 +1185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let complete: (String?) -> Void = { error in
                 succeeded = error == nil && warning == nil && result != nil
                 self.dictationQueue.complete(job)
-                if let error { self.lastError = error; Log.write("変換結果: " + error) }
+                if let error { self.setLastError(error); Log.write("変換結果: " + error) }
                 if self.state != .recording {
                     self.progressPanel.reset()
                     self.restoreDictationState()
@@ -1247,12 +1311,15 @@ extension AppDelegate {
     }
 
     /// 通常モードで連携が切れているときだけ値がある。
-    private var linkFix: AILinkFix? { settings.polishWithClaude ? linkMonitor.status.fix : nil }
+    private var currentKeySettingsLinkStatus: AILinkStatus { keySettingsStatusOverride ?? linkMonitor.status }
+    private var linkFix: AILinkFix? { settings.polishWithClaude ? currentKeySettingsLinkStatus.fix : nil }
 
-    private static func linkDescription(_ fix: AILinkFix) -> String {
+    private static func linkFixPresentation(_ fix: AILinkFix, pendingKeySettings: Bool) -> (title: String, action: Selector, tooltip: String) {
         switch fix {
-        case .login(let tool, _, _): return "\(tool) のログインが切れています。押すとターミナルでログインを開きます。"
-        case .key: return "APIキーが無いか、無効です。押すとキーの設定を開きます。"
+        case .login(let tool, _, _): return ("AIにログイン…", #selector(loginToAI), "\(tool) のログインが切れています。押すとターミナルでログインを開きます。")
+        case .key:
+            let queued = pendingKeySettings ? "録音が終わったら開きます。" : ""
+            return ("AIのキーを設定…", #selector(loginToAI), "APIキーが無いか、無効です。押すとキーの設定を開きます。\(queued)")
         }
     }
 
@@ -1263,33 +1330,103 @@ extension AppDelegate {
             linkMonitor.noteLoginOpened()
             openLogin(tool: tool, executable: executable, arguments: arguments)
         case .key(let provider):
-            guard state == .idle else { NSSound.beep(); return }
-            if provider == .claude { showAPIKeySettings() } else { showOpenAIKeySettings() }
+            switch Self.keySettingsAction(state: state, hasPending: pendingKeySettingsProvider != nil) {
+            case .openNow:
+                pendingKeySettingsProvider = nil
+                showKeySettings(for: provider)
+            case .queue:
+                pendingKeySettingsProvider = provider
+                showPendingKeySettingsNotice()
+            case .alreadyQueued:
+                showPendingKeySettingsNotice()
+            }
         }
     }
 
+    private func showKeySettings(for provider: AIProvider) {
+        if let keySettingsOpenerForCheck { keySettingsOpenerForCheck(provider); return }
+        // 設定画面は NSAlert.runModal() を使う。録音中に開くとメインランループへ割り込み、
+        // 録音完了・貼り付け先のフォーカス復元と競合するため、待機状態まで開かない。
+        if provider == .claude { showAPIKeySettings() } else { showOpenAIKeySettings() }
+    }
+
+    private func schedulePendingKeySettingsIfNeeded() {
+        guard Self.shouldSchedulePendingKeySettings(state: state, provider: pendingKeySettingsProvider,
+                                                    activeProvider: settings.aiProvider, polishEnabled: settings.polishWithClaude,
+                                                    status: currentKeySettingsLinkStatus) else {
+            if !settings.polishWithClaude { pendingKeySettingsProvider = nil }
+            return
+        }
+        enqueueKeySettingsOpen { [weak self] in
+            guard let self,
+                  Self.shouldSchedulePendingKeySettings(state: self.state, provider: self.pendingKeySettingsProvider,
+                                                        activeProvider: self.settings.aiProvider, polishEnabled: self.settings.polishWithClaude,
+                                                        status: self.currentKeySettingsLinkStatus),
+                  let provider = self.pendingKeySettingsProvider else { return }
+            self.pendingKeySettingsProvider = nil
+            self.showKeySettings(for: provider)
+        }
+    }
+
+    private static func keySettingsAction(state: State, hasPending: Bool) -> KeySettingsAction {
+        if state == .idle { return .openNow }
+        return hasPending ? .alreadyQueued : .queue
+    }
+
+    private static func linkFixActionTitle(_ fix: AILinkFix, panel: Bool = false) -> String {
+        switch fix {
+        case .login: return "AIにログイン…"
+        case .key: return panel ? "キーを設定…" : "AIのキーを設定…"
+        }
+    }
+
+    private static func pendingKeySettingsAfterLinkChange(_ provider: AIProvider?, status: AILinkStatus) -> AIProvider? {
+        guard let provider, case .down(.key(let current)) = status, current == provider else { return nil }
+        return provider
+    }
+
+    private static func shouldSchedulePendingKeySettings(state: State, provider: AIProvider?, activeProvider: AIProvider,
+                                                         polishEnabled: Bool, status: AILinkStatus) -> Bool {
+        polishEnabled && state == .idle && provider == activeProvider && pendingKeySettingsAfterLinkChange(provider, status: status) != nil
+    }
+
+    private enum KeySettingsAction: Equatable { case openNow, queue, alreadyQueued }
+
     private var loginAction: AIStatusPanel.Action? {
-        guard linkFix != nil else { return nil }
-        return .init(title: "AIにログイン…") { [weak self] in self?.loginToAI() }
+        guard let fix = linkFix else { return nil }
+        let title = Self.linkFixActionTitle(fix, panel: true)
+        return .init(title: title) { [weak self] in self?.loginToAI() }
+    }
+
+    private func linkNoticeActions() -> [AIStatusPanel.Action] {
+        var actions = [AIStatusPanel.Action(title: "閉じる") { [weak self] in self?.aiPanel.close() }]
+        if let loginAction { actions.insert(loginAction, at: 0) }
+        return actions
+    }
+
+    private func showPendingKeySettingsNotice() {
+        if let pendingKeyNoticeForCheck { pendingKeyNoticeForCheck(); return }
+        aiPanel.show(message: "AI連携が切れています。文章は保存されます。録音が終わったら開きます。",
+                     actions: linkNoticeActions(), autoCloseAfter: 6)
     }
 
     private func showLinkNotice() {
         guard !linkNoticeShown else { return }
         linkNoticeShown = true
-        var actions = [AIStatusPanel.Action(title: "閉じる") { [weak self] in self?.aiPanel.close() }]
-        if case .login = linkFix, let loginAction { actions.insert(loginAction, at: 0) }
+        let actions = linkNoticeActions()
         loginPanelOpen = true
         aiPanel.show(message: "AI連携が切れています。文章は保存されます。", actions: actions, autoCloseAfter: 6)
     }
 
     private func linkStatusChanged(from old: AILinkStatus, to new: AILinkStatus) {
         updateStatusIcon()
+        pendingKeySettingsProvider = Self.pendingKeySettingsAfterLinkChange(pendingKeySettingsProvider, status: new)
         if new.fix != nil {
             Log.write("AI連携: 切れている")
             if state == .recording { showLinkNotice() }
-        } else if old.fix != nil {
-            Log.write("AI連携: 戻った")
-            if new == .connected {
+        } else {
+            if old.fix != nil { Log.write("AI連携: 戻った") }
+            if old.fix != nil, new == .connected {
                 polishStatus = Self.readyStatus(for: settings.aiProvider)
                 offerPendingAfterLogin()
             }
@@ -1358,7 +1495,7 @@ extension AppDelegate {
         aiPanel.close()
         dictationQueue.beginRecording()
         let job = dictationQueue.enqueue()
-        lastError = nil
+        setLastError(nil)
         state = .processing
         progressPanel.begin(destination: destination ?? "入力先")
         return job
@@ -1486,7 +1623,7 @@ extension AppDelegate {
         switch outcome {
         case .connected(let name):
             polishStatus = "仕上げ: \(name) に接続できました"
-            lastError = nil
+            setLastError(nil)
             updateStatusIcon()
             aiPanel.show(message: "\(name) に接続できました。", actions: pendingOfferActions + [close])
         case .needsLogin(let tool, let executable, let arguments):
@@ -1546,9 +1683,9 @@ extension AppDelegate {
         guard state == .idle, !meeting.isBusy else { return }
         MeetingGoogleDrive.shared.connect { [weak self] result in
             switch result {
-            case .success: self?.lastError = nil
+            case .success: self?.googleConnectionSucceeded()
             case .failure(let error):
-                self?.lastError = error.localizedDescription
+                self?.setLastError(error.localizedDescription, googleFailureKind: (error as? MeetingGoogleDrive.Failure)?.kind)
                 NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
                 alert.messageText = "Google連携を完了できませんでした"
@@ -1558,6 +1695,10 @@ extension AppDelegate {
             }
             self?.updateStatusIcon()
         }
+    }
+    private func googleConnectionSucceeded() {
+        setLastError(nil)
+        meeting.clearConnectionWarning()
     }
     @objc private func diagnoseScreenContext() {
         guard Settings.load().useScreenContext else { return }
@@ -1605,7 +1746,7 @@ extension AppDelegate {
               let chrome = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.google.Chrome" }), MeetingRecognition.isAvailable else { return }
         automaticMeetingCode = code
         meetingContinuity.reset()
-        lastError = nil
+        setLastError(nil)
         Log.write("Meet参加検知: 会議録音開始")
         progressPanel.reset()
         meeting.begin(title: signal?.title ?? "", meetingCode: code, browserPID: chrome.processIdentifier, settings: Settings.load())
@@ -1642,7 +1783,7 @@ extension AppDelegate {
         let job = PolishJob(text: result.text, model: "", effort: "", context: nil, client: nil, aliases: [:], instructions: "", jevSettings: settings.jev)
         failedPolishes = [FailedPolish(result: result, job: job, target: nil, recordingName: nil, keepAudio: true, clientFolder: "")]
         polishStatus = "仕上げ: 失敗（原文をコピー済み）"
-        lastError = PolishRecovery.failureMessage(Polisher.PolishError.maxLoginRequired, provider: .claude)
+        setLastError(PolishRecovery.failureMessage(Polisher.PolishError.maxLoginRequired, provider: .claude))
         history = [result.text]
         pendingDraft = result.text
         updateStatusIcon()
@@ -1651,12 +1792,95 @@ extension AppDelegate {
     static func runMenuLayoutTests() -> Bool {
         var passed = true
         func check(_ name: String, _ good: Bool) { print((good ? "PASS: " : "FAIL: ") + name); passed = passed && good }
+        let keyFix = AILinkFix.key(.claude)
+        let keyRow = Self.linkFixPresentation(keyFix, pendingKeySettings: false)
+        check("小窓のキー切れ行はキー設定へ案内", Self.linkFixActionTitle(keyFix, panel: true) == "キーを設定…")
+        check("メニュー先頭のキー切れ行はキー設定へ案内", keyRow.title == "AIのキーを設定…" && keyRow.action == #selector(loginToAI))
+        check("予約中はメニューのツールチップに録音後の案内", Self.linkFixPresentation(keyFix, pendingKeySettings: true).tooltip.contains("録音が終わったら開きます"))
+        check("ログイン切れの小窓とメニュー名は維持", Self.linkFixActionTitle(.login(tool: "Codex", executable: "codex", arguments: []), panel: true) == "AIにログイン…" && Self.linkFixPresentation(.login(tool: "Codex", executable: "codex", arguments: []), pendingKeySettings: false).title == "AIにログイン…")
+        check("録音中のキー設定操作は予約し、再押下も案内する", Self.keySettingsAction(state: .recording, hasPending: false) == .queue && Self.keySettingsAction(state: .recording, hasPending: true) == .alreadyQueued)
+        check("待機中は古い予約があってもクリックで今すぐ開く", Self.keySettingsAction(state: .idle, hasPending: true) == .openNow)
+        let keyFlow = AppDelegate()
+        keyFlow.meeting.suspendBackgroundRetry()
+        keyFlow.avoidKeychainForCheck = true
+        keyFlow.settings.polishWithClaude = true
+        keyFlow.settings.aiProvider = .claude
+        keyFlow.keySettingsStatusOverride = .down(.key(.claude))
+        keyFlow.linkNoticeShown = true  // 状態変更から通知窓を出さない
+        var openedProvider: AIProvider?
+        var keySettingsOpenCount = 0
+        var pendingNoticeCount = 0
+        keyFlow.keySettingsOpenerForCheck = { openedProvider = $0; keySettingsOpenCount += 1 }
+        keyFlow.pendingKeyNoticeForCheck = { pendingNoticeCount += 1 }
+        keyFlow.enqueueKeySettingsOpen = { $0() }
+        check("小窓のキー設定アクションが表示される", keyFlow.loginAction?.title == "キーを設定…" && keyFlow.linkNoticeActions().first?.title == "キーを設定…")
+        let keyMenu = NSMenu()
+        keyFlow.menuNeedsUpdate(keyMenu)
+        check("実際のメニュー先頭がキー設定行", keyMenu.items.first?.title == "AIのキーを設定…" && keyMenu.items.first?.action == #selector(loginToAI))
+        keyFlow.state = .recording
+        keyFlow.loginToAI()
+        keyFlow.loginToAI()
+        check("録音中に本番アクションを押すと予約し、再押下も案内する", keyFlow.pendingKeySettingsProvider == .claude && pendingNoticeCount == 2 && openedProvider == nil)
+        keyFlow.state = .idle
+        check("待機への実遷移で予約が消費され設定画面を1回開く", keyFlow.pendingKeySettingsProvider == nil && openedProvider == .claude && keySettingsOpenCount == 1)
+
+        keyFlow.state = .recording
+        keyFlow.pendingKeySettingsProvider = .claude
+        keyFlow.linkStatusChanged(from: .down(.key(.claude)), to: .down(.login(tool: "Codex", executable: "codex", arguments: [])))
+        check("別の修復状態に変わると実処理で古い予約を取り消す", keyFlow.pendingKeySettingsProvider == nil)
+        keyFlow.pendingKeySettingsProvider = .claude
+        keyFlow.linkStatusChanged(from: .down(.key(.claude)), to: .connected)
+        check("連携回復時に実処理で予約を取り消す", keyFlow.pendingKeySettingsProvider == nil)
+
+        keyFlow.settings.polishWithClaude = false
+        keyFlow.pendingKeySettingsProvider = .claude
+        keyFlow.state = .idle
+        check("AI補正をオフにしたら予約を破棄し自動で開かない", keyFlow.pendingKeySettingsProvider == nil && keySettingsOpenCount == 1)
+        let googleAuthFailure = "Googleの認証更新に失敗しました。VoiceInputのメニューからGoogleドライブへ再接続してください。"
+        let refreshFailure = MeetingGoogleDrive.Failure(message: googleAuthFailure, kind: .needsReconnect)
+        check("Google認証更新の Failure はGoogle連携へ進む", Self.reconnectAction(for: refreshFailure.kind) == #selector(connectMeetingGoogle))
+        let unrelatedFailure = MeetingGoogleDrive.Failure(message: "音声入力の変換に失敗しました")
+        check("関係ない Failure はコピー扱いのまま", Self.reconnectAction(for: unrelatedFailure.kind) == nil)
+        check("Google再連携は録音中に無効", !Self.canReconnectGoogle(state: .recording, meetingBusy: false))
+        check("Google再連携は会議処理中に無効", !Self.canReconnectGoogle(state: .idle, meetingBusy: true))
+        check("Google再連携は待機中だけ有効", Self.canReconnectGoogle(state: .idle, meetingBusy: false))
+        let genericGoogleFailure = MeetingGoogleDrive.Failure(message: "Google接続エラー（HTTP 500）。APIの有効化を確認してください。")
+        check("一般的なGoogle接続エラーは誤って再接続扱いにしない", Self.reconnectAction(for: genericGoogleFailure.kind) == nil)
+        let browserFailure = MeetingGoogleDrive.Failure(message: "Google認証画面を開けませんでした。Chromeを起動して、もう一度Google連携を押してください。", kind: .needsReconnect)
+        check("実際のChrome起動失敗文言は再接続へ進む", Self.reconnectAction(for: browserFailure.kind) == #selector(connectMeetingGoogle))
+        let reconnectFailures = [
+            MeetingGoogleDrive.Failure(message: "Googleドライブに再接続して保存先を確認してください。", kind: .needsReconnect),
+            MeetingGoogleDrive.Failure(message: "Googleから継続接続の許可を取得できませんでした。再接続してください。", kind: .needsReconnect),
+            MeetingGoogleDrive.Failure(message: "Google接続の待ち時間が終了しました。メニューから再接続できます。", kind: .needsReconnect),
+            MeetingGoogleDrive.Failure(message: "Google認証用のブラウザーを開けませんでした。Chromeを起動して再接続してください。", kind: .needsReconnect),
+        ]
+        check("再接続が必要な各 Google Failure は型で連携へ進む", reconnectFailures.allSatisfy { Self.reconnectAction(for: $0.kind) == #selector(connectMeetingGoogle) })
+        let busyStatus = Self.meetingStatusHeadline("要確認: Googleの認証更新に失敗しました", failureKind: .needsReconnect, busyReason: "会議データの処理中は再連携できません")
+        check("会議処理中のGoogle status行は無効で理由を表示", busyStatus.action == nil && !busyStatus.enabled && busyStatus.detail == "会議データの処理中は再連携できません")
+        check("blocked内にログイン語があっても設定へ案内", Self.aiReconnectAction(for: .blocked("認証を確認してください", fromPolish: false)) == #selector(showPreferences))
+        check("downのログイン状態はログイン画面へ案内", Self.aiReconnectAction(for: .down(.login(tool: "Codex", executable: "codex", arguments: []))) == #selector(loginToAI))
+        check("downのOpenAIキー状態はOpenAIキー設定へ案内", Self.aiReconnectAction(for: .down(.key(.openAIAPI))) == #selector(showOpenAIKeySettings))
+        check("downのClaudeキー状態はClaudeキー設定へ案内", Self.aiReconnectAction(for: .down(.key(.claude))) == #selector(showAPIKeySettings))
+        check("OpenAIキー不足はOpenAIキー設定へ案内", Self.missingRequirementAction(.openAIKeyMissing) == #selector(showOpenAIKeySettings))
+        check("Claude CLI不足はAI設定へ案内", Self.missingRequirementAction(.cliMissing) == #selector(showPreferences))
+        check("Codex CLI不足はAI設定へ案内", Self.missingRequirementAction(.codexMissing) == #selector(showPreferences))
         let app = AppDelegate()
         app.meeting.suspendBackgroundRetry()
         app.avoidKeychainForCheck = true
         app.settings.polishWithClaude = false   // 接続先の確認でキーチェーンを読まない
         app.hotKeyRegistered = true
         app.polishStatus = "仕上げ: 確認"
+        app.setLastError(googleAuthFailure, googleFailureKind: .needsReconnect)
+        check("Google認証失敗の行は再連携ツールチップ", app.headline?.action == #selector(connectMeetingGoogle) && app.headline?.detail == "クリックで再連携の画面を開きます")
+        app.state = .recording
+        check("録音中表示は維持しGoogle警告の理由を添える", app.headline?.title == "録音中" && app.headline?.enabled == false && app.headline?.detail == "録音中は再連携できません")
+        app.state = .idle
+        app.setLastError("音声入力の変換に失敗しました")
+        check("関係ないエラー行は従来どおりコピー", app.headline?.action == #selector(copyLastError))
+        app.setLastError(nil)
+        app.setLastError(googleAuthFailure, googleFailureKind: .needsReconnect)
+        app.googleConnectionSucceeded()
+        check("Google連携成功で通知と認証切れ状態を消す", app.lastError == nil && app.lastErrorGoogleFailureKind == nil)
         func titles() -> (top: [String], all: [String]) {
             let menu = NSMenu()
             app.menuNeedsUpdate(menu)

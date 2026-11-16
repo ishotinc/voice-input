@@ -11,6 +11,7 @@ final class MeetingController {
     private var attemptedUploads: [String: Date] = [:]
     private var retryTimer: Timer?
     private var lastStatus = "会議モード・待機中"
+    private var lastStatusFailureKind: MeetingGoogleDrive.FailureKind?
     private(set) var latestURL: URL?
     var canStartBackground: (() -> Bool)?
     var onChange: (() -> Void)?
@@ -24,6 +25,11 @@ final class MeetingController {
         if let active { return active.status + (processing.isEmpty ? "" : "・議事録\(processing.count)件を処理中") }
         if let first = processing.first { return "議事録\(processing.count)件: " + first.status + "（次の録音ができます）" }
         return lastStatus
+    }
+    var statusFailureKind: MeetingGoogleDrive.FailureKind? {
+        if let active { return active.statusFailureKind }
+        if let first = processing.first { return first.statusFailureKind }
+        return lastStatusFailureKind
     }
     func observeSharedScreen(text: String, at: Double) { active?.observeSharedScreen(text: text, at: at) }
     init() {
@@ -53,6 +59,7 @@ final class MeetingController {
                 self.processing.removeAll { $0 === session }
                 if let recordID { self.reservedIDs.remove(recordID) }
                 self.lastStatus = session.status
+                self.lastStatusFailureKind = session.statusFailureKind
                 if let url = session.latestURL { self.latestURL = url }
                 if failedCapture { self.onRecordingFailure?(session.status) }
             }
@@ -93,10 +100,29 @@ final class MeetingController {
         results.append(("後の会議が先に完了しても前会議を保持", controller.processingCount == 1 && controller.processing.first === second && controller.reservedIDs == [second.id]))
         second.onChange?()
         results.append(("全件終了後に待機へ復帰", !controller.isBusy && controller.reservedIDs.isEmpty))
+        controller.lastStatus = "要確認: 録音を開始できませんでした"
+        controller.lastStatusFailureKind = .other
+        controller.clearConnectionWarning()
+        results.append(("Google以外の警告はGoogle再接続後も残す", controller.status == "要確認: 録音を開始できませんでした"))
+        controller.lastStatus = "要確認: 前回のGoogle保存結果が未確認です。重複を防ぐため停止しています"
+        controller.lastStatusFailureKind = .other
+        controller.clearConnectionWarning()
+        results.append(("再接続で直らないGoogle保存警告は残す", controller.status.hasPrefix("要確認:")))
+        controller.lastStatus = "要確認: Googleの認証更新に失敗しました"
+        controller.lastStatusFailureKind = .needsReconnect
+        controller.clearConnectionWarning()
+        results.append(("Googleの警告は再接続後に消す", controller.status == "会議モード・待機中"))
         results.forEach { print("\($0.1 ? "PASS" : "FAIL"): \($0.0)") }
         return results.allSatisfy { $0.1 }
     }
     func suspendBackgroundRetry() { retryTimer?.invalidate() }
+    /// Google再接続後、前回のアップロード失敗表示をメニューに残さない。
+    func clearConnectionWarning() {
+        guard !isBusy, lastStatus.hasPrefix("要確認:"), lastStatusFailureKind == .needsReconnect else { return }
+        lastStatus = "会議モード・待機中"
+        lastStatusFailureKind = nil
+        onChange?()
+    }
     func stop() { active?.stop() }
     func observeParticipants(_ frames: [MeetingPresence]) { active?.observeParticipants(frames) }
     func setSelfDisplayName(_ name: String) { active?.setSelfDisplayName(name) }

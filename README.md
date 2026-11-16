@@ -82,6 +82,12 @@ rm -f ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/jp.ishot
 
 MIT License（[LICENSE](LICENSE)）。同梱の `Resources/SKK-JISYO.L` は GNU GPL v2 以降、`Resources/addresses.json` は日本郵便の郵便番号データを加工したものです（[THIRD-PARTY-NOTICES](Resources/THIRD-PARTY-NOTICES.txt)）。
 
+## v1.4.1 の変更
+
+- メニューに「要確認: Googleの認証更新に失敗しました」などの行が出たとき、その行を押すと Google 連携や AI のログイン・キー設定の画面が開くようになりました
+- 録音中に出る「AI連携が切れています」の小窓に「キーを設定…」ボタンが付き、そこから設定を直せるようになりました
+- 更新するときは、いまのアプリを終了してから置き換えてください。署名が変わるため、マイクとアクセシビリティの許可を入れ直す必要があることがあります（「設定…」→「一般」→「権限を確認…」）
+
 ## v1.4.0 の変更
 
 - AI 補正で直された語の組を数え、用語辞書に自動で足すようにしました。正しい表記が録音を始めたときの画面に出ていれば1回、出ていなければ3回で足します。数字・否定・人名らしい語・普段使う一般語は足しません。足した語は「設定…」→「一般」→「自動で足した語…」で見られ、1件ずつ外せます。上限は200件で、60日使われなかった語は外れます。保存するのは語の組と回数・日付だけです（`~/.voice-input/learned-terms.json`）

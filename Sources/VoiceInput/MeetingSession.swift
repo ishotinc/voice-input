@@ -8,6 +8,7 @@ final class MeetingSession: @unchecked Sendable {
     enum State { case idle, starting, recording, finishing }
     private(set) var state: State = .idle
     private(set) var status = "会議モード・待機中"
+    private(set) var statusFailureKind: MeetingGoogleDrive.FailureKind?
     private(set) var latestURL: URL?
     var onCaptureReleased: (() -> Void)?
     private static let finishingQueue = DispatchQueue(label: "voiceinput.meeting.finishing", qos: .utility)
@@ -413,6 +414,7 @@ final class MeetingSession: @unchecked Sendable {
         if let error { record?.error = error.localizedDescription; record?.status = "failed"; try? record?.save() }
         DispatchQueue.main.async {
             self.state = .idle; self.capture = nil; self.progressTimer?.invalidate(); self.progressTimer = nil
+            self.statusFailureKind = (error as? MeetingGoogleDrive.Failure)?.kind
             self.status = error.map { "要確認: " + $0.localizedDescription } ?? "議事録をGoogleドキュメントに保存しました"
             self.onChange?()
         }
